@@ -491,8 +491,267 @@ production formula), including:
 - Milestone 1's `eta_overall = 0.75` remains a placeholder (Section 4),
   unchanged and unrevisited in Milestone 2.
 
-## 18. Milestone 3 (recommended direction, not implemented here)
+## 18. Milestone 2 status
 
-Motor/ESC/electrical operating-point matching and battery-power
-implications, using the Milestone 1/2 aerodynamic and rotational
-requirements without changing them.
+Milestone 2 is complete and frozen as of commit `bdd924a`. Milestone 3
+(below) is purely additive: it imports and reuses Milestone 1
+(`actuator_disk.py`/`efficiency.py`/`requirements.py`/`sizing.py`) and
+Milestone 2 (`rotational.py`/`compressibility.py`/`fan_loading.py`/
+`rotational_study.py`) without modifying any of them, and every Milestone
+1/2 test, script, and figure remains unchanged (see Section 25).
+
+---
+
+# Milestone 3 -- motor / ESC / battery electrical matching
+
+## 19. Source audit (inspected before writing any M3 electrical physics)
+
+1. **Electrical power and motor efficiency** (Tyto Robotics, "Brushless
+   Motor Power and Efficiency Analysis" -- a widely used practical
+   reference for RC/small-UAV brushless motor testing, restating standard
+   electrical-machine bookkeeping). Confirms, verbatim: electrical power
+   `P = V*I`; mechanical power `P_mech = Torque * RPM`; motor efficiency
+   = mechanical power output / electrical power input. This is the
+   standard `eta_motor = P_shaft / P_motor_elec` relation implemented in
+   `src/edf_sizing/motor.py`. No electromagnetic (winding resistance,
+   back-EMF, current-torque) model is taken from this or any other source
+   -- motor behavior here is reduced to a single efficiency number.
+2. **NASA CR-2506, "Brushless DC Motors"** (NASA Technical Reports Server,
+   search-corroborated) -- general aerospace context confirming brushless
+   DC motor terminology and that all motor mechanical power is delivered
+   to the coupled load (here, the fan) with no separate transmission
+   losses modeled.
+3. **LiPo cell voltage and C-rate convention** (Roger's Hobby Center LiPo
+   guide, a widely cited hobbyist/technical reference restating the
+   standard convention; cross-checked against multiple similar sources
+   found in the audit search). Confirms, verbatim: LiPo nominal cell
+   voltage **3.7 V**; full-charge cell voltage **4.2 V**; minimum/cutoff
+   cell voltage **3.0 V** (never to be confused with each other); series
+   pack convention "2S = 7.4 V, 3S = 11.1 V" (i.e. `V_pack = N_s *
+   V_cell`); C-rate as a multiplier on capacity (Ah) giving maximum
+   continuous current. These are exactly the conventions implemented in
+   `src/edf_sizing/battery.py`.
+4. **Motor Kv (rpm/V) convention** (Endless Sphere DIY EV forum "The exact
+   meaning of Kv", Brushless.com, and Tyto Robotics Kv/pole-count guides --
+   search-corroborated, consistent across sources). Confirms Kv is a
+   **no-load** speed-per-volt constant, and that using it to infer *loaded*
+   RPM from a supply voltage alone is not rigorous (the relevant voltage
+   is back-EMF, not applied terminal voltage, once current flows). **No
+   sourced, independently verifiable loaded-RPM-from-Kv relation was
+   found that could be implemented without either inventing an
+   unsupported approximation or requiring winding-resistance/current data
+   this project does not model.** Per the Milestone 3 brief's explicit
+   fallback, **Kv is deliberately omitted entirely** -- Milestone 3 sizes
+   power, current, and torque, but does not constrain or select a motor
+   winding speed constant. This is a stated limitation (Section 24), not
+   an oversight.
+
+**No credible universal motor/ESC efficiency, current rating, or C_T-tied
+electrical coefficient was found for a generic reduced-order EDF unit.**
+`eta_motor`, `eta_ESC`, ESC current rating, motor rated power, and the
+battery continuous C-rate limit are therefore all explicit, illustrative
+sensitivity parameters (Section 21), never sourced design values.
+
+## 20. Electrical power chain (no double-counting of `eta_overall`)
+
+Implemented across `src/edf_sizing/motor.py`, `electrical.py`, and
+`battery.py`, combined in `electrical_sizing.py`. The full chain, with
+each stage's SOURCED equation and which module owns it:
+
+```
+M1 ideal actuator-disk power       Pi                                  [actuator_disk.py, UNCHANGED]
+  -> M1 estimated shaft power      P_shaft_est = Pi / eta_overall       [efficiency.py, UNCHANGED, eta_overall=0.75]
+  -> motor electrical input        P_motor_elec = P_shaft_est / eta_motor   [motor.py, NEW]
+  -> battery input power           P_battery = P_motor_elec / eta_ESC       [electrical.py, NEW]
+  -> battery current                I_battery = P_battery / V_pack          [electrical.py, NEW]
+```
+
+`P_shaft_est` (already divided by `eta_overall=0.75` exactly once,
+upstream in Milestone 1) is treated as the **inherited, fixed** mechanical
+shaft-power requirement for Milestone 3 -- it is read from
+`RotationalOperatingRow.p_shaft_est_W` and passed directly into
+`motor_electrical_power`, which divides it by `eta_motor` only. `eta_overall`
+is never referenced, imported, or re-applied anywhere in `motor.py`,
+`electrical.py`, `battery.py`, or `electrical_sizing.py` (a structural
+import check enforces this in
+`tests/test_electrical_sizing.py::test_no_double_counting_of_eta_overall`).
+
+Also implemented: shaft torque `Q = P_shaft / omega` (`motor.py`, using
+`omega` from Milestone 2's `rotational.angular_speed` -- an independent
+cross-check via `omega*R` style reconstruction is in
+`tests/test_motor.py`), and a generic `rating_margin(rated, required) =
+rated/required - 1` (`electrical.py`) used for every ESC/battery/motor
+margin, never clipped at zero.
+
+## 21. Motor / ESC / battery assumptions (ILLUSTRATIVE unless noted)
+
+| Assumption | Baseline | Sensitivity set | Status |
+|---|---|---|---|
+| `eta_motor` | 0.90 | {0.85, 0.90, 0.95} | ILLUSTRATIVE |
+| `eta_ESC` | 0.97 | {0.95, 0.97, 0.99} | ILLUSTRATIVE |
+| Motor rated electrical power | 4500 W | -- | ILLUSTRATIVE |
+| ESC continuous current rating | 100 A | {80, 100, 120} A | ILLUSTRATIVE |
+| Pack capacity | 4.0 Ah | {4.0, 6.0, 8.0} Ah | ILLUSTRATIVE |
+| Pack continuous C-rate limit | 20C | -- | ILLUSTRATIVE |
+| Candidate series counts | -- | {12S, 14S, 16S} | ILLUSTRATIVE |
+| LiPo cell voltages (nom/full/min) | 3.7 / 4.2 / 3.0 V | -- | **SOURCED** (Section 19.3) |
+
+None of these (other than the cell-voltage convention) are sourced from a
+real motor/ESC/battery datasheet -- they are conceptual, generic values
+chosen only to exercise the sizing model, per the Milestone 3 brief.
+
+## 22. Predeclared M2 reference rotational case
+
+Per the Milestone 3 brief: **`C_T = 0.08`** is adopted as the M3 reference
+rotational case (`REFERENCE_C_T` in `electrical_sizing.py`), because it is
+the middle Milestone 2 sensitivity case, it passes the Milestone 2
+tip-Mach screen (static tip Mach 0.715 < `M_tip,max`=0.85), and gives
+static RPM ~= 9298. `C_T = 0.12` is retained as an explicit sensitivity
+case. **`C_T = 0.05` is retained, unerased, as the historically
+tip-Mach-infeasible case** (static tip Mach 0.905 > 0.85) -- it is reported
+in every script run but not used to build an electrical operating point,
+since it never passed the Milestone 2 screen.
+
+An emergent, notable property of this reduced-order model (not tuned, and
+documented explicitly): required battery current/power at a fixed thrust
+depend only on `P_shaft_est` (a function of thrust and disk area, from
+Milestone 1) -- **not** on the assumed `C_T`. Changing `C_T` changes RPM,
+torque, and tip Mach for the same thrust, but not the ideal/shaft power
+or downstream electrical current. This is a direct consequence of RPM
+being *inferred from* an assumed `C_T` rather than being a physically
+independent input in this model (Section 14 of the Milestone 2
+documentation).
+
+## 23. Battery pack candidate rule and results
+
+**Predeclared rule** (declared before evaluating any candidate;
+`PACK_SELECTION_RULE_DESCRIPTION` in `electrical_sizing.py`): select the
+lowest-voltage candidate pack, evaluated at the governing (static)
+operating point, satisfying ALL of:
+
+1. uses the Milestone 2 tip-Mach-feasible reference rotational case
+   (`C_T = 0.08`);
+2. motor rated electrical power exceeds required motor electrical power;
+3. ESC continuous-current rating exceeds required battery current;
+4. battery continuous-current capability exceeds required battery
+   current;
+5. required C-rate does not exceed the declared pack continuous C-rate;
+6. all margins >= 0 (never clipped -- a negative margin is reported as a
+   failing gate).
+
+### Result (baseline assumptions: `eta_motor=0.90`, `eta_ESC=0.97`,
+capacity=4.0 Ah, C-rate limit=20C, ESC I_max=100 A)
+
+| Pack | V_nom [V] | V_full [V] | I_batt [A] (static) | C-rate | ESC margin | Battery-I margin | C-rate margin | All gates? |
+|---|---|---|---|---|---|---|---|---|
+| 12S | 44.4 | 50.4 | 88.48 | 22.12 | +0.130 | **-0.096** | **-0.096** | **NO** |
+| 14S | 51.8 | 58.8 | 75.84 | 18.96 | +0.319 | +0.055 | +0.055 | yes (SELECTED) |
+| 16S | 59.2 | 67.2 | 66.36 | 16.59 | +0.507 | +0.206 | +0.206 | yes |
+
+**Selected conceptual electrical architecture: 14S** (the lowest-voltage
+candidate satisfying every gate). 12S fails honestly (negative battery-
+current and C-rate margins, not tuned away): at 4.0 Ah / 20C, its 80 A
+continuous rating cannot support the required 88.48 A static current.
+
+At a worst-case efficiency sensitivity (`eta_motor=0.85`, `eta_ESC=0.95`),
+**only 16S remains feasible** -- 14S's margins turn negative (required
+current rises to ~82.0 A against an 80 A battery limit at 4.0 Ah). This is
+reported as a genuine finding illustrating margin fragility, not adjusted
+away (see `scripts/electrical_sizing_study.py` output and
+`tests/test_electrical_sizing.py::test_pack_selection_worst_case_sensitivity_only_16s_survives`).
+
+Increasing pack capacity (e.g. to 6.0 or 8.0 Ah at fixed 20C) makes 12S
+feasible too, since the derived continuous-current limit scales with
+capacity -- demonstrating the basic capacity/C-rate trade without
+changing the baseline-assumption selection.
+
+## 24. Motor shaft-torque requirement (reference case, D = 0.50 m)
+
+| Operating point | RPM | omega [rad/s] | Q = P_shaft/omega [N*m] |
+|---|---|---|---|
+| Static | 9298.3 | 973.7 | 3.522 |
+| Cruise | 3001.0 | 314.3 | 2.017 |
+
+Independently verified via `Q*omega` reconstruction
+(`tests/test_motor.py::test_shaft_torque_reconstructs_power_independently`)
+and cross-checked against `edf_sizing.rotational.angular_speed`
+(`test_shaft_torque_matches_independent_omega_from_rotational_module`).
+This torque requirement is useful context for future motor matching; no
+winding current is derived from it (Section 19.4 -- Kv/Kt intentionally
+omitted).
+
+## 25. Verification approach (Milestone 3)
+
+`tests/test_motor.py`, `tests/test_electrical.py`, `tests/test_battery.py`,
+and `tests/test_electrical_sizing.py` implement independent checks
+(hand-derived, not re-derived from the production formula), including:
+
+- `P = V*I` hand calculations and its inverse (`I = P/V`); higher voltage
+  gives lower current at fixed power.
+- Motor/ESC power-chain hand calculations (`P_elec = P_shaft/eta_motor`,
+  `P_batt = P_motor/eta_ESC`); lower efficiency increases downstream
+  power/current (both stages).
+- Shaft torque hand calculation and independent `omega` cross-check
+  (`rotational.angular_speed`) and power reconstruction (`Q*omega =
+  P_shaft`).
+- Series-pack nominal and full-charge voltage hand calculations,
+  cross-checked against the commonly cited "2S=7.4V, 3S=11.1V" reference;
+  pack energy (Wh) hand calculation; C-rate hand calculation; higher
+  capacity lowers required C-rate at fixed current.
+- Rating-margin exact-boundary tests: margin exactly 0 at the rating
+  boundary, positive just below, negative just above -- never clipped.
+- Predeclared pack-selection-rule tests: 12S fails and is reported (not
+  hidden), 14S is selected, a deliberately infeasible-ESC case is handled
+  honestly (no forced selection), and the worst-case efficiency
+  sensitivity correctly narrows the feasible set to 16S only.
+- Regression: Milestone 1 static/cruise `P_shaft_est` values, the
+  Milestone 2 `C_T=0.08` tip-Mach-feasible / `C_T=0.05`
+  tip-Mach-infeasible classifications, and the Milestone 1 `D=0.50 m`
+  selection are all unchanged.
+- No double-counting of `eta_overall` (Section 20) -- both a numeric
+  reconstruction check and a structural check that `motor.py` has no
+  dependency on `efficiency.py`.
+- No NaN/Inf across a full motor x ESC x pack sensitivity matrix (27
+  combinations x 2 operating points).
+
+**Final Milestone 3 test count: 79 new tests (202 total with Milestone
+1/2's 123, all passing under `pytest -W error -q`).**
+
+## 26. Explicit Milestone 3 limitations
+
+- No electromagnetic motor model: winding resistance, back-EMF, and
+  current-torque (Kt) relations are not modeled. `eta_motor` is a single
+  bulk efficiency number.
+- **Kv (motor speed constant) is deliberately omitted entirely** (Section
+  19.4) -- no sourced, independently verifiable loaded-RPM-from-Kv
+  relation could be built without inventing unsupported physics. This
+  means Milestone 3 sizes power/current/torque but does NOT constrain or
+  select a motor winding speed constant, and does not screen voltage/RPM
+  compatibility via Kv.
+- No motor or ESC thermal model.
+- No battery electrochemical model (internal resistance, voltage sag
+  under load, temperature effects, cycle life, aging) -- only Ah/Wh/V/
+  C-rate bookkeeping per Section 19.3.
+- No ESC switching-loss or PWM model -- `eta_ESC` is a single bulk
+  efficiency number.
+- No mission-energy or endurance model: `energy_Wh_nom` exists purely for
+  electrical bookkeeping (Ah/Wh/C-rate), never for a flight-time claim.
+- `eta_motor`, `eta_ESC`, motor/ESC current and power ratings, and the
+  battery continuous C-rate limit are illustrative sensitivity
+  assumptions, not sourced or manufacturer datasheet values.
+- Because RPM (via the assumed `C_T`) does not feed back into
+  `P_shaft_est`, required battery current/power is identical across the
+  `C_T` sensitivity cases at a fixed thrust (Section 22) -- this is a
+  property of the reduced-order model, not a physically matched
+  propeller/motor/ESC performance map.
+- No flight-qualified propulsion design, no manufacturer product
+  recommendation, no real commercial motor/ESC/battery calibration.
+- Milestone 1's `eta_overall = 0.75` remains an unrevisited placeholder
+  (Section 4); Milestone 2's `M_tip_max`/`C_T` assumptions are unchanged.
+
+## 27. Milestone 4 (recommended direction, not implemented here)
+
+Not specified by this milestone's scope; to be defined based on portfolio
+priorities (e.g. acoustic estimation, mission-energy/endurance modeling,
+or a sourced reduced-order thermal check on the motor/ESC electrical
+operating point established here).

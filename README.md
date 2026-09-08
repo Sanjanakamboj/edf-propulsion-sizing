@@ -74,14 +74,61 @@ matched propeller/fan performance map. The tip-Mach ceiling and `C_T`
 sensitivity set are explicit illustrative assumptions, not sourced
 universal EDF values.
 
+## Status: Milestone 3
+
+Milestone 3 is additive on top of the frozen Milestone 1/2 baseline. It
+extends the aerodynamic/rotational requirement into a reduced-order
+electrical (motor/ESC/battery) sizing model:
+
+- Motor electrical-input power (`P_motor_elec = P_shaft_est / eta_motor`)
+  and required shaft torque (`Q = P_shaft/omega`), building on the
+  inherited Milestone 1 shaft-power estimate and Milestone 2 rotational
+  kinematics ([src/edf_sizing/motor.py](src/edf_sizing/motor.py)).
+- Generic electrical primitives (`P=VI`), an ESC efficiency/rating model,
+  and a never-clipped rating-margin helper
+  ([src/edf_sizing/electrical.py](src/edf_sizing/electrical.py)).
+- A series-cell (xS) battery pack model using a sourced generic LiPo cell-
+  voltage convention (3.7 V nominal / 4.2 V full-charge / 3.0 V minimum),
+  pack energy, and C-rate
+  ([src/edf_sizing/battery.py](src/edf_sizing/battery.py)).
+- A combining module building full static/cruise electrical operating
+  points, a predeclared battery-pack selection rule, and deterministic
+  sensitivity studies
+  ([src/edf_sizing/electrical_sizing.py](src/edf_sizing/electrical_sizing.py)).
+
+**Result:** at the Milestone 2 reference rotational case (`C_T=0.08`),
+the predeclared rule selects a **14S** conceptual pack -- the lowest-
+voltage candidate whose motor/ESC/battery current and C-rate margins are
+all non-negative at the baseline illustrative efficiencies (`eta_motor
+=0.90`, `eta_ESC=0.97`). The 12S candidate fails honestly (negative
+battery-current/C-rate margin at the 4.0 Ah baseline capacity) rather than
+being tuned away. Electrical sizing does **not** invalidate the Milestone
+1/2 D = 0.50 m fan choice or its admissible RPM region -- it adds a
+downstream electrical architecture on top of the unchanged aerodynamic/
+rotational requirement. See [DESIGN.md](DESIGN.md), Milestone 3 sections,
+for the full source audit, equations, sensitivity results, and
+limitations.
+
+### Explicitly out of scope for Milestone 3
+
+Detailed electromagnetic motor modeling, motor/ESC thermal models, battery
+electrochemical modeling, ESC switching-loss modeling, mission-energy/
+endurance modeling, and any real commercial motor/ESC/battery calibration
+or product recommendation. Motor Kv is deliberately omitted entirely (no
+sourced, independently verifiable loaded-RPM-from-Kv relation could be
+built without inventing unsupported physics) -- Milestone 3 sizes power,
+current, and torque, but not a motor winding speed constant.
+
 ## Repository layout
 
 ```
 src/edf_sizing/     # requirements, actuator_disk, efficiency, sizing (M1)
                      # rotational, compressibility, fan_loading, rotational_study (M2)
+                     # motor, electrical, battery, electrical_sizing (M3)
 tests/              # independent verification (pytest)
 scripts/            # run_sizing.py, make_figures.py (M1)
                      # rotational_fan_study.py, make_rotational_figures.py (M2)
+                     # electrical_sizing_study.py, make_electrical_figures.py (M3)
 figures/            # generated portfolio figures (deterministic PNGs)
 ```
 
@@ -95,10 +142,13 @@ python3 scripts/run_sizing.py
 python3 scripts/make_figures.py
 python3 scripts/rotational_fan_study.py
 python3 scripts/make_rotational_figures.py
+python3 scripts/electrical_sizing_study.py
+python3 scripts/make_electrical_figures.py
 ```
 
-## Milestone 3 (planned, not yet implemented)
+## Milestone 4 (not yet defined)
 
-Motor/ESC/electrical operating-point matching and battery-power
-implications, using the Milestone 1/2 aerodynamic and rotational
-requirements without changing them.
+Not specified by the current milestone scope; a candidate direction is a
+sourced reduced-order thermal check on the motor/ESC electrical operating
+point established in Milestone 3, or mission-energy/endurance modeling,
+without changing the Milestone 1-3 requirements.
