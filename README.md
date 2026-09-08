@@ -1,168 +1,119 @@
 # EDF Propulsion Sizing
 
-A transparent, reduced-order electric ducted-fan (EDF) sizing model for a
-**generic** UAV, built as a portfolio engineering study.
+A from-scratch, fully-verified reduced-order sizing chain that answers one
+question for a generic small UAV: **starting from nothing but actuator-disk
+momentum theory, what fan diameter, RPM, battery pack, and mission-energy
+capacity does a twin electric-ducted-fan propulsion system need — and does
+that architecture survive realistic thrust losses and forward-flight
+lapse?**
 
-> **This is a conceptual, reduced-order study, not a manufacturer-calibrated
-> propulsion model.** All aircraft/requirement numbers are illustrative and
-> do not represent a real aircraft. No real commercial EDF unit is modeled
-> or calibrated against.
+> **This is a conceptual, reduced-order portfolio study, not a
+> manufacturer-calibrated or flight-qualified propulsion model.** All
+> aircraft/requirement numbers are illustrative and do not represent a real
+> aircraft. No real commercial EDF, motor, ESC, or battery product is
+> modeled or calibrated against.
 
-## Status: Milestone 1
+## Final engineering conclusion
 
-Milestone 1 implements only the actuator-disk / momentum-theory foundation:
+1. **M1** (actuator-disk momentum theory) selects a **D = 0.50 m** fan by a
+   predeclared disk-loading/ideal-power rule.
+2. **M2** (rotational kinematics + tip-Mach) constrains admissible RPM but
+   leaves the M1 diameter unchanged — smaller diameters spin faster than
+   the tip-Mach ceiling allows.
+3. **M3** (motor/ESC/battery) selects a **14S** electrical architecture —
+   the lowest-voltage candidate whose current/C-rate margins are positive.
+4. **M4** (mission energy) drives battery capacity from M3's 4.0 Ah
+   baseline up to **28.0 Ah** — the 4.0 Ah pack passes M3's instantaneous
+   current screen but fails the mission-energy requirement outright.
+5. **M5** (thrust-effectiveness + forward-flight lapse) shows that at an
+   illustrative `eta_T=0.90`, the *unmodified* M1 static sizing does **not**
+   close (-10.0% shortfall) — but RPM-based recovery, still within the M2
+   tip-Mach ceiling, restores it exactly, and the resulting current/energy
+   penalties both fit inside the M3/M4 architecture (with thinner margins).
+6. **eta_T=0.80 breaks it** — RPM recovery itself is still fine, but the
+   resulting current exceeds the ESC rating *and* the energy margin goes
+   negative, simultaneously. A genuine, non-tuned failure mode.
+7. **M6** (final robustness audit) independently re-derives every headline
+   number from raw formulas (32/32 checks pass, max residual ~1e-13),
+   quantifies exactly how much margin is left at baseline, and computes —
+   not asserts — which assumption the whole chain is most sensitive to.
 
-- A generic representative UAV propulsion requirement (mass, fan count,
-  cruise speed, air density, static/cruise thrust levels) with all
-  assumptions explicit ([src/edf_sizing/requirements.py](src/edf_sizing/requirements.py)).
-- Ideal 1-D actuator-disk (momentum theory) relations for static and axial
-  forward-flight operation: thrust, induced velocity, ideal power, disk
-  loading ([src/edf_sizing/actuator_disk.py](src/edf_sizing/actuator_disk.py)).
-- A clearly separated, explicitly illustrative non-ideal efficiency
-  bookkeeping layer to estimate shaft/electrical power
-  ([src/edf_sizing/efficiency.py](src/edf_sizing/efficiency.py)).
-- A candidate fan-diameter sweep, a predeclared conceptual selection rule,
-  and a representative static/cruise thrust table for the selected fan
-  ([src/edf_sizing/sizing.py](src/edf_sizing/sizing.py)).
+**Final robustness margin is sensitivity-dependent: the baseline
+architecture is feasible with positive margins on every gate, but the
+tightest of them (mission cruise duration) has only ~9.5% headroom.** See
+[RESULTS.md](RESULTS.md) for the full numbers.
 
-See [DESIGN.md](DESIGN.md) for the full derivation, sources inspected, and
-all explicit assumptions.
+## Key numbers
 
-### Explicitly out of scope for Milestone 1
+| Quantity | Value |
+|---|---|
+| Selected fan diameter | 0.50 m |
+| Static / cruise thrust requirement | 147.10 N / 15.32 N per fan |
+| Reference RPM (C_T=0.08) / tip Mach | 9298 / 0.715 |
+| Electrical architecture | 14S (51.8 V), 88.83 A static |
+| Mission energy (raw / required nominal) | 878.1 Wh / 1317.2 Wh |
+| Selected battery capacity | 28.0 Ah |
+| Baseline thrust effectiveness, eta_T | 0.90 (illustrative) |
+| RPM recovery / tip-Mach ceiling | 9801 / 11049 RPM |
+| M5-updated mission energy | 920.7 Wh (+4.9%) |
+| **Overall baseline feasibility** | **FEASIBLE**, governed by mission-energy margin (+0.050) |
 
-Blade-element theory, RPM selection, motor Kv selection, tip-Mach
-constraints, duct pressure-recovery modeling, motor/controller sizing,
-battery sizing, acoustic prediction, and any real commercial EDF
-calibration. Ideal actuator-disk power is never called "motor power" --
-see the efficiency layer for the one explicit, labeled conversion.
+## Final constraint table
 
-## Status: Milestone 2
+| Constraint | Milestone | Margin | Status |
+|---|---|---|---|
+| Disk loading | M1 | +0.201 | PASS |
+| Ideal power | M1 | +0.361 | PASS |
+| Tip Mach (reference RPM) | M2 | +0.188 | PASS |
+| ESC current | M3 | +0.126 | PASS |
+| Battery current/C-rate | M3 | +5.304 | PASS |
+| Mission-energy capacity | M4/M5 | **+0.050 (governing)** | PASS |
+| Static thrust (pre-recovery, honest diagnostic) | M5 | -0.100 | FAIL* |
+| Cruise thrust | M5 | +6.344 | PASS |
 
-Milestone 2 is additive on top of the frozen Milestone 1 baseline. It adds
-rotational kinematics, blade-tip Mach constraints, and a reduced-order
-nondimensional fan-loading framework:
+\* Not a feasibility gate on its own — static thrust is satisfied via RPM
+recovery (see [RESULTS.md](RESULTS.md) §3).
 
-- Pure rotational kinematics: RPM/rev-s, angular speed, blade-tip speed
-  ([src/edf_sizing/rotational.py](src/edf_sizing/rotational.py)).
-- Ambient speed of sound and static/relative (helical) blade-tip Mach
-  number, plus an analytic tip-Mach-limited RPM ceiling (static and
-  forward-flight) ([src/edf_sizing/compressibility.py](src/edf_sizing/compressibility.py)).
-- A reduced-order actuator-disk pressure-jump estimate and the classical
-  nondimensional thrust/power/advance-ratio coefficients (`C_T`, `C_P`,
-  `J`), plus a derived RPM-from-`C_T` inversion
-  ([src/edf_sizing/fan_loading.py](src/edf_sizing/fan_loading.py)).
-- A combining module that builds static/cruise rotational operating
-  tables and a full diameter x RPM x tip-Mach trade study for the
-  Milestone 1 candidate sweep, reconciling whether Milestone 2 changes
-  the Milestone 1 fan selection
-  ([src/edf_sizing/rotational_study.py](src/edf_sizing/rotational_study.py)).
+## Robustness findings
 
-**Result:** the Milestone 1 selected D = 0.50 m fan is **not invalidated**
-by Milestone 2 -- it passes the tip-Mach constraint under 2 of 3
-illustrative thrust-coefficient (`C_T`) sensitivity cases (fails only the
-most lightly-loaded case). Milestone 2 constrains the admissible RPM range
-for the selected fan; it does not change the Milestone 1 diameter
-selection. See [DESIGN.md](DESIGN.md), Milestone 2 sections, for the full
-source audit, equations, sensitivity results, and limitations.
+- **Strongest sensitivity (computed, not asserted): battery capacity**
+  (swing 1.88), followed by cruise duration (1.67), `eta_T` (1.33),
+  tip-Mach ceiling (1.11), and motor efficiency (1.08) — all five flip
+  feasibility somewhere in their tested range.
+- **Tightest boundary: mission cruise duration** — only +9.5% headroom
+  (1315 s vs. the 1200 s baseline) before the 28 Ah pack's energy margin
+  reaches zero.
+- **0.50 m remains the smallest viable diameter** under baseline M5 losses
+  (0.45 m fails M1's disk-loading gate outright); 0.55/0.60 m trade a
+  larger fan for more margin across every gate.
+- Full grid: of 24 tested `eta_T` x cruise-duration combinations, 8 are
+  feasible; the governing failure mode splits between ESC current (6
+  cases), static-thrust/RPM-ceiling (6 cases), and mission energy (4
+  cases) — no single failure mode dominates.
 
-### Explicitly out of scope for Milestone 2
+See [RESULTS.md](RESULTS.md) for the complete breakdown.
 
-Blade-element theory, motor Kv selection, ESC/battery sizing, detailed
-compressor maps, CFD, and any real commercial EDF calibration. `C_P` uses
-the Milestone 1 illustrative estimated shaft power and is not a physically
-matched propeller/fan performance map. The tip-Mach ceiling and `C_T`
-sensitivity set are explicit illustrative assumptions, not sourced
-universal EDF values.
+## Verification
 
-## Status: Milestone 3
+Every headline number in this repository is independently reproducible
+from raw formulas, not merely reprinted from production objects:
 
-Milestone 3 is additive on top of the frozen Milestone 1/2 baseline. It
-extends the aerodynamic/rotational requirement into a reduced-order
-electrical (motor/ESC/battery) sizing model:
+- **350 tests** (`pytest -W error -q`), each using hand-derived expected
+  values or independent reconstruction — never a production function
+  checked against itself.
+- **`scripts/independent_audit.py`**: a standalone script that recomputes
+  32 headline M1-M5 quantities from separately-written formulas and
+  diffs them against the live pipeline output (max residual ~1e-13,
+  floating-point noise only).
+- **26 deterministic figures**, each regenerated and SHA-256-compared
+  across this session — byte-identical every time.
+- **Clean-environment reproduction**: the full suite, `ruff check .`, and
+  every study script were re-run in a fresh virtual environment outside
+  the repository, matching the development environment's output exactly.
 
-- Motor electrical-input power (`P_motor_elec = P_shaft_est / eta_motor`)
-  and required shaft torque (`Q = P_shaft/omega`), building on the
-  inherited Milestone 1 shaft-power estimate and Milestone 2 rotational
-  kinematics ([src/edf_sizing/motor.py](src/edf_sizing/motor.py)).
-- Generic electrical primitives (`P=VI`), an ESC efficiency/rating model,
-  and a never-clipped rating-margin helper
-  ([src/edf_sizing/electrical.py](src/edf_sizing/electrical.py)).
-- A series-cell (xS) battery pack model using a sourced generic LiPo cell-
-  voltage convention (3.7 V nominal / 4.2 V full-charge / 3.0 V minimum),
-  pack energy, and C-rate
-  ([src/edf_sizing/battery.py](src/edf_sizing/battery.py)).
-- A combining module building full static/cruise electrical operating
-  points, a predeclared battery-pack selection rule, and deterministic
-  sensitivity studies
-  ([src/edf_sizing/electrical_sizing.py](src/edf_sizing/electrical_sizing.py)).
+Full detail: [VERIFICATION.md](VERIFICATION.md).
 
-**Result:** at the Milestone 2 reference rotational case (`C_T=0.08`),
-the predeclared rule selects a **14S** conceptual pack -- the lowest-
-voltage candidate whose motor/ESC/battery current and C-rate margins are
-all non-negative at the baseline illustrative efficiencies (`eta_motor
-=0.90`, `eta_ESC=0.97`). The 12S candidate fails honestly (negative
-battery-current/C-rate margin at the 4.0 Ah baseline capacity) rather than
-being tuned away. Electrical sizing does **not** invalidate the Milestone
-1/2 D = 0.50 m fan choice or its admissible RPM region -- it adds a
-downstream electrical architecture on top of the unchanged aerodynamic/
-rotational requirement. See [DESIGN.md](DESIGN.md), Milestone 3 sections,
-for the full source audit, equations, sensitivity results, and
-limitations.
-
-### Explicitly out of scope for Milestone 3
-
-Detailed electromagnetic motor modeling, motor/ESC thermal models, battery
-electrochemical modeling, ESC switching-loss modeling, mission-energy/
-endurance modeling, and any real commercial motor/ESC/battery calibration
-or product recommendation. Motor Kv is deliberately omitted entirely (no
-sourced, independently verifiable loaded-RPM-from-Kv relation could be
-built without inventing unsupported physics) -- Milestone 3 sizes power,
-current, and torque, but not a motor winding speed constant.
-
-## Status: Milestone 4
-
-Milestone 4 is additive on top of the frozen Milestone 1-3 baseline. It
-extends the electrical operating point into a reduced-order mission-energy
-and battery-capacity sizing study:
-
-- A constant-power mission-segment model and a predeclared, illustrative
-  4-segment generic mission profile (launch/climb/cruise/loiter), built
-  entirely from inherited Milestone 3 static/cruise battery powers
-  ([src/edf_sizing/mission.py](src/edf_sizing/mission.py)).
-- Energy integration (`E=P*t`, exact J->Wh conversion), reserve/usable-
-  energy bookkeeping, required capacity, and an illustrative cell/pack-
-  level battery-mass proxy
-  ([src/edf_sizing/energy.py](src/edf_sizing/energy.py)).
-- A combining module: mission energy requirement, a predeclared battery-
-  capacity selection rule (current AND energy must both pass), and a
-  pack-voltage carry-forward trade across the Milestone 3 12S/14S/16S
-  candidates
-  ([src/edf_sizing/mission_sizing.py](src/edf_sizing/mission_sizing.py)).
-
-**Result:** the representative mission (raw energy 878.1 Wh, dominated
-55% by the cruise segment) requires **1317.2 Wh** of nominal battery
-energy once a 20% reserve and an 80% usable-energy fraction are applied
-(both illustrative). The Milestone 3 **4.0 Ah/14S pack passes the current/
-C-rate screen but fails the energy requirement by a wide margin** --
-demonstrating that current feasibility and mission-energy feasibility are
-independent questions. The predeclared capacity-selection rule selects a
-**28.0 Ah/14S** pack (the smallest candidate satisfying both screens).
-Mission-energy sizing does not change the Milestone 1/2 fan selection or
-tip-Mach screen; the Milestone 3 14S voltage choice remains fully valid
-(all three candidate voltages become current-feasible once capacity is
-resized for energy). See [DESIGN.md](DESIGN.md), Milestone 4 sections, for
-the full source audit, equations, sensitivity results, and limitations.
-
-### Explicitly out of scope for Milestone 4
-
-Aircraft trajectory/performance simulation, full trajectory integration,
-detailed battery electrochemistry, battery/motor thermal modeling, battery
-voltage-sag or aging modeling, dispatch/reliability analysis, and
-flight-qualified endurance prediction. A restricted "cruise-only energy
-diagnostic" is computed but explicitly labeled as NOT a range, endurance,
-or mission-duration-capability claim.
-
-## Repository layout
+## Repository structure
 
 ```
 src/edf_sizing/     # requirements, actuator_disk, efficiency, sizing (M1)
@@ -170,82 +121,95 @@ src/edf_sizing/     # requirements, actuator_disk, efficiency, sizing (M1)
                      # motor, electrical, battery, electrical_sizing (M3)
                      # mission, energy, mission_sizing (M4)
                      # duct_losses, thrust_lapse, performance_envelope (M5)
-tests/              # independent verification (pytest)
-scripts/            # run_sizing.py, make_figures.py (M1)
-                     # rotational_fan_study.py, make_rotational_figures.py (M2)
-                     # electrical_sizing_study.py, make_electrical_figures.py (M3)
-                     # mission_energy_study.py, make_mission_figures.py (M4)
-                     # thrust_lapse_study.py, make_thrust_lapse_figures.py (M5)
-figures/            # generated portfolio figures (deterministic PNGs)
+                     # robustness (M6)
+tests/              # independent verification (pytest), one file per module
+scripts/            # one engineering-report script + one figure script per milestone,
+                     # plus independent_audit.py and final_robustness_study.py (M6)
+figures/            # 26 generated portfolio figures (deterministic PNGs)
+DESIGN.md           # full derivations, source audits, equations, per-milestone results
+RESULTS.md          # results-first summary (this is the fast read)
+VERIFICATION.md     # independent-verification record and residual table
 ```
 
-## Running it
+## How to run
 
 ```bash
 python3 -m pip install -e ".[dev]"
 python3 -m pytest -W error -q
 ruff check .
-python3 scripts/run_sizing.py
+
+python3 scripts/run_sizing.py                    # M1
 python3 scripts/make_figures.py
-python3 scripts/rotational_fan_study.py
+python3 scripts/rotational_fan_study.py           # M2
 python3 scripts/make_rotational_figures.py
-python3 scripts/electrical_sizing_study.py
+python3 scripts/electrical_sizing_study.py        # M3
 python3 scripts/make_electrical_figures.py
-python3 scripts/mission_energy_study.py
+python3 scripts/mission_energy_study.py           # M4
 python3 scripts/make_mission_figures.py
-python3 scripts/thrust_lapse_study.py
+python3 scripts/thrust_lapse_study.py             # M5
 python3 scripts/make_thrust_lapse_figures.py
+python3 scripts/independent_audit.py              # M6
+python3 scripts/final_robustness_study.py
+python3 scripts/make_final_figures.py
 ```
 
-## Status: Milestone 5
+## Limitations
 
-Milestone 5 is additive on top of the frozen Milestone 1-4 baseline. It
-answers the key question: **does the selected 0.50 m EDF architecture
-still meet required thrust once realistic reduced-order fan/duct losses
-and forward-flight thrust lapse are introduced?**
+No blade-element theory, CFD, compressor maps, motor/ESC/battery thermal
+models, battery electrochemistry, acoustic prediction, real-product
+calibration, aircraft trajectory simulation, or continuous aircraft drag
+polar anywhere in this project. Every non-first-principles coefficient
+(`eta_overall`, `eta_T`, thrust-lapse parameters, `M_tip,max`, `eta_motor`,
+`eta_ESC`, reserve/usable-energy fractions, specific energy, mission
+durations) is an explicit, labeled illustrative assumption — see DESIGN.md
+for which are informed by qualitative literature trends vs. purely
+illustrative. Sensitivity ranges throughout are deterministic engineering
+cases, never probability distributions. See [RESULTS.md](RESULTS.md) §8
+and each milestone's DESIGN.md section for the complete limitations list.
 
-- A lumped, illustrative thrust-effectiveness factor `eta_T`
-  (`T_static_available = eta_T * T_ideal_reference`), kept strictly
-  separate from Milestone 3's power efficiencies
-  ([src/edf_sizing/duct_losses.py](src/edf_sizing/duct_losses.py)).
-- A transparent, illustrative forward-flight thrust-lapse model
-  (`T_available(V) = T_static_available * f_lapse(V)`, linear baseline +
-  quadratic sensitivity, `f(0)=1`, bounded in [0,1])
-  ([src/edf_sizing/thrust_lapse.py](src/edf_sizing/thrust_lapse.py)).
-- A combining module: thrust margins, RPM-based thrust recovery within
-  the frozen Milestone 2 tip-Mach ceiling (`T~RPM^2`, `P~RPM^3`), its
-  Milestone 3 electrical consequence, and its Milestone 4 mission-energy
-  consequence, evaluated against a predeclared feasibility rule
-  ([src/edf_sizing/performance_envelope.py](src/edf_sizing/performance_envelope.py)).
+## Milestone history
 
-**Result:** at the predeclared baseline `eta_T = 0.90`, the unmodified
-Milestone 1 static sizing does **not** close (available thrust 132.4 N
-vs. 147.1 N required, a **-10.0% honest shortfall**) -- but RPM-based
-recovery within the Milestone 2 tip-Mach ceiling restores it exactly
-(9801 RPM vs. an 11049 RPM ceiling), and the resulting electrical current
-(88.8 A) and mission-energy penalty (+4.9%, 921 Wh vs. 878 Wh) both stay
-within the Milestone 3/4 architecture's margins. **The full M1-M5 chain
-is feasible at baseline.** At a more pessimistic `eta_T = 0.80`
-sensitivity case, RPM recovery itself still stays within the tip-Mach
-ceiling, but the resulting current exceeds the ESC rating and the
-mission-energy margin turns negative -- an honest, non-tuned failure mode
-governed by the electrical/energy constraints, not the rotational one.
-Cruise thrust passes with a very large margin at every case tested. See
-[DESIGN.md](DESIGN.md), Milestone 5 sections, for the full source audit,
-equations, sensitivity results, and limitations.
+Each milestone is additive and frozen once complete — later milestones
+never silently rewrite an earlier milestone's equations or results (every
+regression is independently tested; see `tests/`).
 
-### Explicitly out of scope for Milestone 5
+- **Milestone 1 — Actuator-disk foundation.** Ideal 1-D momentum theory
+  (`actuator_disk.py`), a generic UAV requirement (`requirements.py`), an
+  illustrative non-ideal efficiency layer (`efficiency.py`), and a
+  predeclared fan-diameter selection rule (`sizing.py`). Out of scope:
+  blade-element theory, RPM, tip-Mach, duct/motor/battery sizing.
+- **Milestone 2 — Rotational kinematics and tip Mach.** RPM, tip speed,
+  and blade-tip Mach (`rotational.py`, `compressibility.py`), NACA-style
+  `C_T`/`C_P`/`J` coefficients (`fan_loading.py`), and a diameter x RPM x
+  tip-Mach trade study (`rotational_study.py`). Result: M1's D=0.50 m
+  fan remains admissible; M2 constrains RPM, not diameter.
+- **Milestone 3 — Motor/ESC/battery electrical matching.** Motor
+  electrical power and torque (`motor.py`), generic electrical primitives
+  and an ESC model (`electrical.py`), a series-cell battery pack using a
+  sourced LiPo voltage convention (`battery.py`), and a predeclared
+  pack-voltage selection rule (`electrical_sizing.py`). Result: 14S
+  selected; 12S fails honestly at the 4.0 Ah baseline capacity.
+- **Milestone 4 — Mission energy and battery capacity.** A constant-power
+  mission-segment model and predeclared 4-segment mission
+  (`mission.py`), energy integration and reserve/usable-energy bookkeeping
+  (`energy.py`), and a capacity-selection rule requiring both current AND
+  energy feasibility (`mission_sizing.py`). Result: capacity grows from
+  4.0 Ah to 28.0 Ah; current and energy feasibility are independent
+  questions.
+- **Milestone 5 — Thrust-effectiveness and forward-flight lapse.** A
+  lumped thrust-effectiveness factor (`duct_losses.py`), an illustrative
+  forward-flight lapse model (`thrust_lapse.py`), and RPM-based thrust
+  recovery with its electrical/energy consequences
+  (`performance_envelope.py`). Result: baseline `eta_T=0.90` requires
+  off-design RPM recovery to close static thrust; recovery fits the M2
+  tip-Mach ceiling and the M3/M4 architecture, with reduced margins.
+- **Milestone 6 — Final robustness audit and portfolio synthesis.**
+  Independent re-derivation of every headline number
+  (`scripts/independent_audit.py`), a cross-milestone constraint table,
+  boundary/breakpoint analysis, and a computed sensitivity ranking
+  (`robustness.py`). No new physics — pure verification and synthesis of
+  the frozen M1-M5 chain. See [RESULTS.md](RESULTS.md) and
+  [VERIFICATION.md](VERIFICATION.md).
 
-Blade-element momentum theory, CFD, compressor-map simulation, inlet
-distortion modeling, detailed duct aerodynamics, real fan-map
-calibration, motor thermal modeling, battery electrochemistry, aircraft
-trajectory simulation, and experimentally validated hardware prediction.
-No continuous aircraft drag polar is modeled -- only the static and
-cruise operating points are treated as thrust requirements.
-
-## Milestone 6 (not yet defined)
-
-Final robustness audit and portfolio synthesis across Milestones 1-5,
-including independent verification, a concise final operating-envelope
-summary, and clean-environment reproducibility, without changing
-historical physics.
+Full per-milestone source audits, equations, and limitations:
+[DESIGN.md](DESIGN.md).

@@ -1393,9 +1393,235 @@ values, byte-for-byte unchanged.
 - No motor/ESC thermal model, no battery electrochemistry, no aircraft
   trajectory simulation (unchanged from prior milestones).
 
-## 44. Milestone 6 (recommended direction, not implemented here)
+## 44. Milestone 5 status
 
-Final robustness audit and portfolio synthesis across Milestones 1-5,
-including independent verification, a concise final operating-envelope
-summary, and clean-environment reproducibility, without changing
-historical physics.
+Milestone 5 is complete and frozen as of commit `32ba043`. Milestone 6
+(below) introduces **no new physics** -- it is purely additive
+orchestration, verification, and synthesis over the frozen Milestone 1-5
+chain (`src/edf_sizing/robustness.py` calls only existing M1-M5 APIs).
+
+---
+
+# Milestone 6 -- final robustness audit and portfolio synthesis
+
+## 45. Scope and non-goals
+
+Per the Milestone 6 brief, this milestone answers seven synthesis
+questions (influential assumptions, governing constraints, robustness,
+where feasibility breaks first, structural vs. bookkeeping assumptions,
+a 60-second summary, and independent reconstructibility of every headline
+number) using only the already-built M1-M5 model. It explicitly adds
+**no** blade-element theory, CFD, compressor maps, motor/battery thermal
+or electrochemical models, acoustic prediction, real product selection,
+new mission aerodynamics, new drag models, new fan geometry, or new
+control logic.
+
+## 46. Final inherited baseline architecture (not retuned in M6)
+
+`src/edf_sizing/robustness.py::FinalArchitecture` (instance `BASELINE`)
+collects, verbatim, the M1-M5 committed defaults:
+
+| Field | Value | Source |
+|---|---|---|
+| `diameter_m` | 0.50 | M1 |
+| `reference_c_t` | 0.08 | M2 (`REFERENCE_C_T`) |
+| `m_tip_max` | 0.85 | M2 (`DEFAULT_M_TIP_MAX`) |
+| `n_series` | 14 | M3 |
+| `capacity_Ah` | 28.0 | M4 |
+| `eta_T` | 0.90 | M5 (`DEFAULT_ETA_T`) |
+| `eta_overall` | 0.75 | M1 |
+| `eta_motor` | 0.90 | M3 (`DEFAULT_ETA_MOTOR`) |
+| `eta_esc` | 0.97 | M3 (`DEFAULT_ETA_ESC`) |
+| `reserve_fraction` | 0.20 | M4 |
+| `usable_fraction` | 0.80 | M4 |
+| `cruise_duration_s` | 1200.0 | M4 |
+| `lapse_model` | linear, k=0.30, V_ref=60 | M5 (`DEFAULT_LAPSE_MODEL`) |
+
+## 47. Cross-milestone constraint set (Section 6 of the brief)
+
+Implemented in `robustness.py::build_constraint_table`, reusing
+`edf_sizing.sizing.evaluate_candidates`, `edf_sizing.electrical_sizing
+.reference_rotational_rows`, and the M5 `PerformanceEnvelopeResult` --
+no equation is re-derived. Every margin uses the single convention
+`margin = rated/required - 1` (positive = PASS), consistent with the
+`RatingMargin` convention already established in M3/M4/M5.
+
+| # | Constraint | Milestone | Value | Limit | Margin | Status |
+|---|---|---|---|---|---|---|
+| A | Disk loading | M1 | 749.17 N/m^2 | 900 N/m^2 | +0.201 | PASS |
+| B | Ideal power | M1 | 2572.29 W | 3500 W | +0.361 | PASS |
+| C | Tip Mach (reference RPM) | M2 | 0.715 | 0.85 | +0.188 | PASS |
+| D | ESC current | M3 | 88.83 A | 100 A | +0.126 | PASS |
+| E | Battery current/C-rate | M3 | 88.83 A | 560 A (20C@28Ah) | +5.304 | PASS |
+| F | Mission-energy capacity | M4/M5 | 1104.85 Wh | 1160.32 Wh | +0.050 | PASS |
+| G | Static thrust (baseline RPM, pre-recovery) | M5 | 132.39 N | 147.10 N | **-0.100** | **FAIL** |
+| H | Cruise thrust | M5 | 112.53 N | 15.32 N | +6.344 | PASS |
+
+Row G is a deliberate **pre-recovery diagnostic** (Section 11 of the M5
+brief explicitly requested reporting the baseline shortfall honestly) --
+it is NOT itself feasibility gate (3); gate (3) is satisfied through RPM
+recovery instead (Section 48). A row-G-only reading of "governing
+constraint" would always show row G whenever `eta_T<1` by construction,
+which is why `scripts/final_robustness_study.py` reports the governing
+constraint from the actual post-recovery gate set (D, E, F, H, plus RPM
+headroom), not from the raw 8-row minimum.
+
+## 48. Feasibility classification (Section 8 of the brief)
+
+`robustness.py::evaluate_case` classifies each deterministic case against
+7 gates, using explicit status constants (`FEASIBLE`,
+`FAIL_M1_LOADING`, `FAIL_TIP_MACH`, `FAIL_STATIC_THRUST`,
+`FAIL_CRUISE_THRUST`, `FAIL_ESC_CURRENT`, `FAIL_BATTERY_CURRENT`,
+`FAIL_MISSION_ENERGY`). All simultaneous failures are recorded (never
+just the first found); a **predeclared** governing-failure priority order
+(`GOVERNING_FAILURE_PRIORITY`, upstream-to-downstream: M1 sizing -> tip
+Mach -> static-thrust recovery -> cruise thrust -> ESC current -> battery
+current -> mission energy) picks one deterministic "governing" failure
+for reporting when multiple fail.
+
+**Baseline case (`eta_T=0.90`): FEASIBLE, zero failures.**
+**`eta_T=0.80`: INFEASIBLE**, failures = `{FAIL_ESC_CURRENT,
+FAIL_MISSION_ENERGY}`, governing = `FAIL_ESC_CURRENT` (both fail
+simultaneously; ESC current precedes mission energy in the declared
+priority).
+
+## 49. Boundary / breakpoint analysis (Section 9 of the brief)
+
+Implemented via bracketed bisection (`robustness.py::_bisect_boundary`)
+on each boundary's monotone feasibility/margin predicate -- independently
+verified by evaluating cases just above/below each returned boundary
+(see `tests/test_robustness.py`).
+
+| Boundary | Value | Baseline | Method |
+|---|---|---|---|
+| Minimum `eta_T` (fully feasible) | 0.8317 | 0.90 | bisection on `RobustnessResult.feasible` |
+| Maximum cruise duration (energy margin >= 0) | 1314.6 s | 1200 s | bisection on `capacity_margin.ok` |
+| Minimum `eta_motor` (current-feasible) | 0.7995 | 0.90 | bisection on ESC+battery current `.ok` |
+| Minimum `eta_ESC` (current-feasible) | 0.8616 | 0.97 | bisection on ESC+battery current `.ok` |
+| Minimum required capacity @ baseline `eta_T` | 26.66 Ah | 28.0 Ah selected | bisection on `capacity_margin.ok` |
+| Max static RPM (`M_tip,max=0.85`) | 11048.5 | -- | `compressibility.max_rpm_static` (M2, unchanged) |
+| Max recoverable thrust-loss fraction | 0.2917 | -- | DERIVED: `1 - (RPM_ref/RPM_ceiling)^2` |
+
+The maximum-recoverable-thrust-loss-fraction boundary is independently
+cross-checked in `tests/test_robustness.py` against the same closed-form
+`(rpm_reference/rpm_ceiling)^2` expression used for the M5 RPM-recovery
+formula's own boundary, evaluated separately.
+
+## 50. Sensitivity ranking (Section 10 of the brief)
+
+**Declared metric (before evaluating any grid):** for each parameter, the
+maximum fractional swing, across its predeclared sensitivity range, in
+the single most-binding margin among `{ESC current margin, battery
+current margin, mission-energy capacity margin, cruise-thrust margin,
+RPM-recovery/tip-Mach headroom fraction}` (`robustness.py
+::_governing_margin_metric`).
+
+**Self-caught metric gap, fixed before finalizing:** an initial version
+of this metric omitted the RPM-recovery/tip-Mach headroom term, which
+made `m_tip_max` rank with zero swing despite `m_tip_max=0.75` genuinely
+flipping baseline feasibility (RPM required 9801 > ceiling 9749 at that
+stricter limit). Adding the headroom term to the `min()` resolved the
+inconsistency (swing now 1.108, correctly nonzero) without touching any
+M1-M5 physics; regression-tested in
+`tests/test_robustness.py::test_m_tip_max_flip_is_reflected_in_nonzero_swing`.
+
+| Rank | Parameter | Range | Swing | Flips feasibility? |
+|---|---|---|---|---|
+| 1 | `capacity_Ah` | 24/28/32 Ah | 1.884 | Yes |
+| 2 | `cruise_duration_s` | 600/1200/1800 s | 1.670 | Yes |
+| 3 | `eta_T` | 1.00 down to 0.65 | 1.327 | Yes |
+| 4 | `m_tip_max` | 0.75/0.85/0.95 | 1.108 | Yes |
+| 5 | `eta_motor` | 0.85/0.90/0.95 | 1.075 | Yes |
+| 6 | `eta_esc` | 0.95/0.97/0.99 | 0.603 | No |
+| 7 | `n_series` | 14/16 | 0.555 | No |
+| 8 | `reference_c_t` | 0.08/0.12 | 0.000 | No |
+
+`reference_c_t` scores exactly zero because, in this reduced-order model,
+`C_T` changes RPM/tip Mach/torque but not `P_shaft_est` (Section 22 of
+the M2/M4 documentation already noted this) -- so it never touches
+whichever gate is currently binding (mission energy, at baseline). This
+is a genuine, honestly-computed result, not an artifact.
+
+## 51. Diameter robustness (Section 11 of the brief)
+
+`robustness.py::sweep_diameter` re-evaluates the full case (M1 gates
+through M5 recovery/electrical/energy) at each of `{0.45, 0.50, 0.55,
+0.60}` m, reusing `evaluate_candidates` for the M1 gate and
+`evaluate_performance_envelope` for everything downstream -- the M1
+selection rule itself is never re-invoked or overridden.
+
+| D [m] | M1 gates | RPM required | Tip Mach | Current | Energy margin | Feasible |
+|---|---|---|---|---|---|---|
+| 0.45 | FAIL (disk loading) | 12100 | 0.838 | 98.70 A | +0.010 | NO |
+| **0.50** | PASS | 9801 | 0.754 | 88.83 A | +0.050 | **YES** |
+| 0.55 | PASS | 8100 | 0.685 | 80.75 A | +0.086 | YES |
+| 0.60 | PASS | 6806 | 0.628 | 74.02 A | +0.117 | YES |
+
+**0.50 m remains the smallest viable diameter** under baseline M5 losses
+-- confirming, not silently replacing, the M1 selection. Larger diameters
+trade a bigger fan for more margin on every gate; this trade is reported
+honestly (Section 11 of the M5/M6 briefs explicitly asks not to silently
+reselect a new fan even if a larger diameter is "more robust").
+
+## 52. Independent audit (Section 3 of the brief)
+
+`scripts/independent_audit.py` recomputes 32 headline M1-M5 quantities
+from formulas written directly in that script (never calling the same
+production function on both sides of a comparison) and diffs them
+against the actual pipeline output (candidate/row/envelope objects, not
+memorized rounded literals). **Result: 32/32 checks pass; max absolute
+residual 1.14e-13; max relative residual 2.45e-16** (both floating-point
+noise, far under the declared `1e-6` tolerance). See
+[VERIFICATION.md](VERIFICATION.md) for the full per-quantity table.
+
+A first draft of this script compared hand formulas against *rounded,
+memorized headline literals* (e.g. `17.49` instead of the true
+`17.4867...`) rather than actual pipeline values, which produced small
+but real-looking residuals (~1e-2) purely from rounding -- this was
+caught and fixed by switching every comparison to the live pipeline
+object, and by fixing one further real bug: the "28 Ah capacity margin"
+check originally compared against the M4-baseline mission energy instead
+of the M5-updated mission energy the actual production margin uses,
+producing a 2x discrepancy. Both are self-caught script defects (not
+M1-M5 physics defects) and are documented here per the preservation rule.
+
+## 53. Documentation number audit
+
+Every headline number appearing in README.md, RESULTS.md,
+VERIFICATION.md, and this document was cross-checked against fresh output
+from `scripts/run_sizing.py`, `rotational_fan_study.py`,
+`electrical_sizing_study.py`, `mission_energy_study.py`,
+`thrust_lapse_study.py`, `final_robustness_study.py`, and
+`independent_audit.py` run in this session (Section 1 baseline audit and
+Sections 46-52 above). No stale number remains from a prior session.
+
+## 54. Milestone 1-5 preservation confirmation
+
+All Milestone 1-5 source files, their tests, their scripts, and all 21
+previously committed figures are byte-for-byte unchanged by Milestone 6
+(verified via `git diff --stat` showing zero changes to any of these
+paths, and figure-hash comparison before/after the full 26-figure
+regeneration, and a clean-environment re-run producing identical
+headline output).
+
+## 55. Explicit Milestone 6 limitations
+
+- Milestone 6 adds no new physics -- every number is a recombination or
+  boundary/sensitivity analysis of the frozen M1-M5 equations.
+- The sensitivity ranking metric (Section 50) is one declared, defensible
+  choice (minimum margin across the numeric feasibility gates); a
+  different declared metric could rank parameters differently -- this is
+  stated explicitly, not hidden.
+- Boundary searches (Section 49) use bisection to a `1e-6` tolerance on
+  one parameter at a time (all others held at baseline); they are not a
+  joint/simultaneous multi-parameter optimization or worst-case search.
+- "Robustness" here means deterministic sensitivity across predeclared
+  engineering cases -- no probability, confidence, or likelihood
+  language is used or implied anywhere in M6 outputs.
+- The diameter/voltage/capacity "trades" reported (Sections 51, and M3/M4
+  history) are honest comparisons, not claims that a different choice
+  would be superior once real hardware, cost, or packaging constraints
+  are considered.
+
+This is the final milestone of the EDF Propulsion Sizing portfolio study.
+No Milestone 7 is planned or begun.
