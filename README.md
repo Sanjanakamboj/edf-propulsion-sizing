@@ -169,11 +169,13 @@ src/edf_sizing/     # requirements, actuator_disk, efficiency, sizing (M1)
                      # rotational, compressibility, fan_loading, rotational_study (M2)
                      # motor, electrical, battery, electrical_sizing (M3)
                      # mission, energy, mission_sizing (M4)
+                     # duct_losses, thrust_lapse, performance_envelope (M5)
 tests/              # independent verification (pytest)
 scripts/            # run_sizing.py, make_figures.py (M1)
                      # rotational_fan_study.py, make_rotational_figures.py (M2)
                      # electrical_sizing_study.py, make_electrical_figures.py (M3)
                      # mission_energy_study.py, make_mission_figures.py (M4)
+                     # thrust_lapse_study.py, make_thrust_lapse_figures.py (M5)
 figures/            # generated portfolio figures (deterministic PNGs)
 ```
 
@@ -191,10 +193,59 @@ python3 scripts/electrical_sizing_study.py
 python3 scripts/make_electrical_figures.py
 python3 scripts/mission_energy_study.py
 python3 scripts/make_mission_figures.py
+python3 scripts/thrust_lapse_study.py
+python3 scripts/make_thrust_lapse_figures.py
 ```
 
-## Milestone 5 (not yet defined)
+## Status: Milestone 5
 
-Duct/fan efficiency sensitivity and a reduced-order static-to-forward-
-flight thrust lapse model, using the frozen Milestone 1-4 fan/RPM/
-electrical/energy architecture without changing historical results.
+Milestone 5 is additive on top of the frozen Milestone 1-4 baseline. It
+answers the key question: **does the selected 0.50 m EDF architecture
+still meet required thrust once realistic reduced-order fan/duct losses
+and forward-flight thrust lapse are introduced?**
+
+- A lumped, illustrative thrust-effectiveness factor `eta_T`
+  (`T_static_available = eta_T * T_ideal_reference`), kept strictly
+  separate from Milestone 3's power efficiencies
+  ([src/edf_sizing/duct_losses.py](src/edf_sizing/duct_losses.py)).
+- A transparent, illustrative forward-flight thrust-lapse model
+  (`T_available(V) = T_static_available * f_lapse(V)`, linear baseline +
+  quadratic sensitivity, `f(0)=1`, bounded in [0,1])
+  ([src/edf_sizing/thrust_lapse.py](src/edf_sizing/thrust_lapse.py)).
+- A combining module: thrust margins, RPM-based thrust recovery within
+  the frozen Milestone 2 tip-Mach ceiling (`T~RPM^2`, `P~RPM^3`), its
+  Milestone 3 electrical consequence, and its Milestone 4 mission-energy
+  consequence, evaluated against a predeclared feasibility rule
+  ([src/edf_sizing/performance_envelope.py](src/edf_sizing/performance_envelope.py)).
+
+**Result:** at the predeclared baseline `eta_T = 0.90`, the unmodified
+Milestone 1 static sizing does **not** close (available thrust 132.4 N
+vs. 147.1 N required, a **-10.0% honest shortfall**) -- but RPM-based
+recovery within the Milestone 2 tip-Mach ceiling restores it exactly
+(9801 RPM vs. an 11049 RPM ceiling), and the resulting electrical current
+(88.8 A) and mission-energy penalty (+4.9%, 921 Wh vs. 878 Wh) both stay
+within the Milestone 3/4 architecture's margins. **The full M1-M5 chain
+is feasible at baseline.** At a more pessimistic `eta_T = 0.80`
+sensitivity case, RPM recovery itself still stays within the tip-Mach
+ceiling, but the resulting current exceeds the ESC rating and the
+mission-energy margin turns negative -- an honest, non-tuned failure mode
+governed by the electrical/energy constraints, not the rotational one.
+Cruise thrust passes with a very large margin at every case tested. See
+[DESIGN.md](DESIGN.md), Milestone 5 sections, for the full source audit,
+equations, sensitivity results, and limitations.
+
+### Explicitly out of scope for Milestone 5
+
+Blade-element momentum theory, CFD, compressor-map simulation, inlet
+distortion modeling, detailed duct aerodynamics, real fan-map
+calibration, motor thermal modeling, battery electrochemistry, aircraft
+trajectory simulation, and experimentally validated hardware prediction.
+No continuous aircraft drag polar is modeled -- only the static and
+cruise operating points are treated as thrust requirements.
+
+## Milestone 6 (not yet defined)
+
+Final robustness audit and portfolio synthesis across Milestones 1-5,
+including independent verification, a concise final operating-envelope
+summary, and clean-environment reproducibility, without changing
+historical physics.

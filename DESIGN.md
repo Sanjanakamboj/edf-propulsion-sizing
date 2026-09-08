@@ -1070,8 +1070,332 @@ before/after the full 16-figure regeneration).
   includes no airframe integration, wiring, connector, or BMS mass beyond
   whatever the chosen specific-energy basis implicitly assumes.
 
-## 35. Milestone 5 (recommended direction, not implemented here)
+## 35. Milestone 4 status
 
-Duct/fan efficiency sensitivity and a reduced-order static-to-forward-
-flight thrust lapse model, using the frozen Milestone 1-4 fan/RPM/
-electrical/energy architecture without changing historical results.
+Milestone 4 is complete and frozen as of commit `806766f`. Milestone 5
+(below) is purely additive: it imports and reuses Milestone 1-4
+(`requirements.py`/`actuator_disk.py`/`efficiency.py`/`sizing.py`;
+`rotational.py`/`compressibility.py`/`fan_loading.py`/`rotational_study.py`;
+`motor.py`/`electrical.py`/`battery.py`/`electrical_sizing.py`;
+`mission.py`/`energy.py`/`mission_sizing.py`) without modifying any of
+them, and every Milestone 1-4 test, script, and figure remains unchanged
+(see Section 41).
+
+---
+
+# Milestone 5 -- duct/fan efficiency sensitivity and thrust lapse
+
+## 36. Source audit (inspected before writing any M5 aerodynamic-loss model)
+
+1. **Ducted-fan performance and duct-loss context** (NASA NTRS "Performance
+   Study of a Ducted Fan System", Abrego/Ames Research Center; NASA NTRS
+   "Experimental Characterization of an Electric Ducted Fan", Weinstein
+   et al., SciTech 2024; search-corroborated). Confirms that duct
+   geometry has a significant effect on rotor velocity/pressure and hence
+   propulsive efficiency, and that non-dimensional total-pressure/total-
+   efficiency quantities are not strongly sensitive to specific inlet/
+   outlet ducting geometry -- corroborating that a single lumped
+   thrust-effectiveness number is a defensible reduced-order
+   simplification for a conceptual study, without claiming any specific
+   duct geometry's performance.
+2. **Static vs. design-point efficiency** (mh-aerotools.de "Static Thrust
+   of Propellers", a propeller-performance reference restating classical
+   results). States that propellers/fans typically achieve only ~50% or
+   less of theoretically predicted static thrust (due to flow separation/
+   distortion) versus 80-90% efficiency at design-point (cruise-like)
+   conditions -- corroborating that a lumped thrust-effectiveness factor
+   below 1.0 is physically reasonable, and informing (not fixing) the
+   Section 38 illustrative `eta_T` sensitivity range.
+3. **Forward-flight thrust lapse with advance ratio** (search-corroborated
+   across multiple propeller-literature sources, e.g. commons.erau.edu
+   propeller-thrust-equation reference, mh-aerotools.de propeller
+   aerodynamic-characteristics page): confirms the qualitative SOURCED
+   trend that propeller/fan thrust decreases as advance ratio (forward
+   speed relative to rotational speed) increases, for a fixed rotational
+   operating point -- "thrust lapse". **No compact, universal,
+   source-verified EDF thrust-lapse curve or coefficient was found**, so
+   Milestone 5 implements a transparent, explicitly ILLUSTRATIVE
+   parametric model (Section 39) rather than fitting to any specific
+   published curve, per the Milestone 5 brief's explicit fallback
+   instruction.
+4. **Figure of merit / actual-vs-ideal actuator-disk thrust ratio**
+   (search-corroborated, e.g. ScienceDirect "Ideal Actuator Disc"
+   overview, academic figure-of-merit references): confirms the general
+   concept that real rotors never achieve the actuator-disk theoretical
+   maximum thrust/efficiency for a given power and diameter -- the
+   conceptual basis for the Section 37 `eta_T` thrust-effectiveness
+   factor, again without a single universal numeric value.
+
+**No credible universal EDF thrust-lapse curve, duct-loss coefficient, or
+fan-effectiveness value was found.** `eta_T` and the thrust-lapse
+coefficient/reference speed are therefore explicit, illustrative,
+deterministic sensitivity parameters (Section 38), never sourced design
+values for any real EDF unit.
+
+## 37. Non-ideal thrust-effectiveness model
+
+Implemented in `src/edf_sizing/duct_losses.py`. The Milestone 1 ideal
+actuator-disk relation is completely unchanged; this module adds a
+separate, downstream, multiplicative factor:
+
+```
+T_static_available = eta_T * T_ideal_reference
+```
+
+`eta_T` lumps fan aerodynamic losses, duct/inlet losses, flow
+nonuniformity, and other unmodeled installation effects into a single
+number (ILLUSTRATIVE, Section 36.2/36.4). It is deliberately **not**
+applied to power -- thrust effectiveness and power efficiency
+(`eta_motor`/`eta_ESC`, Milestone 3, unchanged) are kept strictly
+distinct.
+
+## 38. Thrust-lapse model
+
+Implemented in `src/edf_sizing/thrust_lapse.py`, per the Section 7
+formula of the Milestone 5 brief:
+
+```
+T_available(V) = T_static_available * f_lapse(V)
+f_lapse(0) = 1,  0 <= f_lapse(V) <= 1
+```
+
+Two ILLUSTRATIVE parametric forms are implemented (Section 36.3 -- no
+sourced universal curve exists):
+
+- **Baseline (linear)**: `f_lapse(V) = max(0, 1 - k*(V/V_ref))`,
+  `k = 0.30`, `V_ref = 60.0 m/s` (chosen as 2x the Milestone 1 cruise
+  speed, purely for a convenient normalization -- illustrative, not
+  sourced).
+- **Alternative (quadratic) sensitivity**: `f_lapse(V) = max(0, 1 -
+  k*(V/V_ref)^2)`, same `k` and `V_ref` for comparability.
+
+Crucially, per the brief's Section 7 formula, the SAME
+`T_static_available` (from Section 37, at `V=0`) is lapsed with speed --
+Milestone 1's separately-computed forward-flight "ideal" cruise thrust
+(15.32 N) remains a REQUIRED value only, and is never re-scaled by
+`eta_T` or the lapse factor on the available-thrust side. This
+distinction matters: an earlier implementation draft mistakenly applied
+`eta_T` to the M1 cruise-ideal-reference thrust and then lapsed *that*,
+which silently reproduced a shortfall at the cruise point that the
+brief's formula does not predict; the corrected implementation (matching
+Section 7 literally) shows cruise passing with a very large margin, since
+the available-thrust curve is anchored to the much larger static
+reference. This is documented as a self-caught modeling correction, not
+a historical-result change (no committed M1-M4 value was affected).
+
+## 39. RPM recovery (DERIVED, within the frozen M2 fixed-C_T convention)
+
+Implemented in `src/edf_sizing/performance_envelope.py`. Using the
+Milestone 2 fixed-C_T convention `T ~ n^2` (unchanged):
+
+```
+RPM_required = RPM_reference / sqrt(eta_T)
+```
+
+compared against the Milestone 2 tip-Mach RPM ceiling
+(`compressibility.max_rpm_static`, unchanged). Verified independently:
+substituting `RPM_required` back into `eta_T * (RPM_required/
+RPM_reference)^2` reconstructs exactly `1.0` (i.e. the thrust deficit is
+exactly restored), for every `eta_T` tested.
+
+The corresponding power penalty follows the frozen Milestone 2 fixed-C_P
+convention `P ~ n^3` (unchanged):
+
+```
+power_ratio = (RPM_required / RPM_reference)^3
+```
+
+Note `power_ratio = eta_T^(-3/2)` while the thrust-recovery ratio is only
+`eta_T^(-1)` at the RPM level and exactly `1` in delivered thrust --
+i.e. the power penalty of RPM-based recovery grows faster than the
+thrust shortfall it corrects (verified in the engineering sanity audit,
+Section 42).
+
+## 40. Milestone 5 results
+
+### 40.1 Predeclared baseline case (declared before evaluating results)
+
+`eta_T = 0.90` (ILLUSTRATIVE baseline; sensitivity `{0.80, 0.90, 1.00}`,
+plus a supplementary stress case `eta_T = 0.65` used only to demonstrate
+the RPM-ceiling infeasibility boundary). Baseline lapse model: linear,
+`k=0.30`, `V_ref=60 m/s` (Section 38).
+
+### 40.2 Static thrust (D = 0.50 m, reference static RPM = 9298.3)
+
+| Quantity | Value |
+|---|---|
+| Required | 147.10 N |
+| Available at baseline (reference) RPM | 132.39 N |
+| Margin | -14.71 N (**-10.0%, FAILS honestly**) |
+| RPM required for recovery | 9801.3 |
+| M2 tip-Mach RPM ceiling (`M_tip,max=0.85`) | 11048.5 |
+| Recovery feasible? | **Yes** (headroom: 1247 RPM) |
+| Tip Mach at recovery | 0.754 (< 0.85 ceiling) |
+| Power ratio at recovery | 1.1712 (+17.1% shaft power) |
+
+**The unmodified Milestone 1 static sizing does NOT close under the
+baseline `eta_T=0.90` assumption** -- reported honestly, not tuned away.
+RPM recovery within the Milestone 2 tip-Mach ceiling closes the gap.
+
+### 40.3 Cruise thrust (V_inf = 30 m/s)
+
+| Quantity | Value |
+|---|---|
+| Required | 15.32 N |
+| Available (baseline eta_T=0.90, lapsed from static-available) | 112.53 N |
+| Margin | +97.21 N (**+634%, PASSES with large margin**) |
+
+Cruise passes comfortably at every `eta_T` sensitivity case tested,
+because the available-thrust curve is anchored to the much larger static
+reference thrust (Section 38) -- the aircraft's cruise thrust requirement
+is a small fraction of the fan's forward-flight thrust capability even
+after lapse.
+
+### 40.4 Electrical consequence of RPM-based recovery (14S/28Ah, baseline eta_T)
+
+| Quantity | Value |
+|---|---|
+| Reference shaft power | 3429.7 W |
+| Recovered shaft power | 4016.9 W (+17.1%) |
+| Motor electrical power | 4463.3 W |
+| Battery power | 4601.3 W |
+| Battery current | 88.83 A |
+| C-rate (28 Ah pack) | 3.17 |
+| ESC margin (100 A rating) | +0.126 (**ok**) |
+| Battery current margin (28 Ah @ 20C) | +5.304 (**ok**) |
+
+### 40.5 Mission-energy consequence (new M5 off-design profile; M4 baseline untouched)
+
+| Quantity | Value |
+|---|---|
+| M4 baseline mission energy | 878.11 Wh |
+| M5 updated mission energy (static+climb use recovered power) | 920.71 Wh (+4.9%) |
+| 28 Ah pack usable energy | 1160.32 Wh |
+| Required (reserve-adjusted) | 1104.83 Wh |
+| Capacity margin | +0.050 (**ok**, down from M4's +0.101) |
+
+### 40.6 Overall feasibility (predeclared rule, Section on Milestone 5
+performance envelope)
+
+| eta_T | Static via recovery | Cruise | Current OK | Energy OK | **Overall** |
+|---|---|---|---|---|---|
+| 1.00 | yes (trivially) | yes | yes | yes | **FEASIBLE** |
+| 0.90 (baseline) | yes | yes | yes | yes | **FEASIBLE** |
+| 0.80 | yes (RPM ceiling OK) | yes | **NO** | **NO** | **INFEASIBLE** |
+| 0.65 (stress) | **NO** (exceeds ceiling) | yes | NO | NO | **INFEASIBLE** |
+
+**At the predeclared baseline (`eta_T=0.90`), the full M1-M5 chain
+closes: the 0.50 m fan, the M2 tip-Mach constraint, the M3 14S electrical
+architecture, and the M4 28 Ah battery capacity all remain viable**, but
+only via off-design RPM recovery -- the raw (non-recovered) static margin
+is honestly negative. **At the `eta_T=0.80` sensitivity extreme, the
+architecture fails** -- not because RPM recovery itself is infeasible
+(it stays within the tip-Mach ceiling), but because the resulting
+electrical current exceeds the ESC rating and the resulting mission
+energy exceeds the 28 Ah pack's margin, simultaneously. This is a
+genuine, non-tuned finding: **electrical and energy margins, not the
+rotational/tip-Mach constraint, are the binding failure mode as thrust
+effectiveness degrades further from the baseline.**
+
+### 40.7 Sensitivity summary
+
+| Factor | Effect |
+|---|---|
+| `eta_T` {1.00, 0.90, 0.80, 0.65} | Governs feasibility outcome (Section 40.6) |
+| Lapse model (linear vs. quadratic, same k) | Quadratic gives higher cruise-available thrust (122.5 N vs. 112.5 N) -- cruise passes either way with large margin |
+| `M_tip,max` {0.75, 0.85, 0.95} (at stress `eta_T=0.80`) | Ceiling 9748.7 / 11048.5 / 12348.3 RPM; recovery infeasible only at the strictest 0.75 ceiling |
+| `eta_motor` {0.85, 0.90, 0.95} | Recovered current 94.05 / 88.83 / 84.15 A -- all remain ESC/battery-feasible at baseline `eta_T` |
+| `eta_ESC` {0.95, 0.97, 0.99} | Recovered current 90.70 / 88.83 / 87.03 A -- all feasible at baseline `eta_T` |
+| Pack voltage (14S/28Ah vs. 16S/24Ah) | 16S draws less current (77.72 A vs. 88.83 A) and keeps a smaller but still positive energy margin (+0.029) |
+| Diameter (0.45/0.50/0.55/0.60 m) | Tip-Mach RPM ceiling only reported (12276/11048/10044/9207 RPM) -- M1 diameter selection is NOT re-opened |
+
+## 41. Milestone 1-4 preservation confirmation
+
+All Milestone 1-4 source files, their tests, their scripts, and all 16
+previously committed figures are byte-for-byte unchanged by Milestone 5
+(verified via `git diff --stat` showing zero changes to any of these
+paths, and figure-hash comparison before/after the full 21-figure
+regeneration).
+
+## 42. Verification approach and engineering sanity audit (Milestone 5)
+
+`tests/test_duct_losses.py`, `tests/test_thrust_lapse.py`, and
+`tests/test_performance_envelope.py` implement independent checks
+(hand-derived, not re-derived from the production formula), including:
+
+- Thrust-effectiveness hand calculation; `eta_T=1` exactly reproduces the
+  ideal reference thrust; lower `eta_T` monotonically lowers available
+  thrust.
+- Lapse-function boundary (`f(0)=1` for both linear and quadratic forms),
+  bounded-in-[0,1] checks over a wide speed range, and a hand-derived
+  available-thrust calculation.
+- RPM-recovery exact-formula hand check; independent `T~RPM^2`
+  round-trip verification that the recovered RPM restores exactly 100%
+  of the reference thrust; `P~RPM^3` power-scaling hand check;
+  exact-boundary RPM-ceiling test (feasible at/just-below, infeasible
+  just-above).
+- Electrical propagation hand calculation (reusing Milestone 3
+  primitives directly) and an exact-zero current-margin boundary test.
+- Mission-energy-penalty hand calculation, and confirmation that
+  evaluating an M5 case never mutates the M4 baseline `MissionProfile`
+  object.
+- Full-envelope integration tests reproducing the four feasibility rows
+  of Section 40.6 exactly (`eta_T` = 1.00 fully feasible, 0.90 feasible
+  via recovery, 0.80 fails electrical+energy, 0.65 fails the RPM
+  ceiling).
+- Regression: Milestone 1 static/cruise thrust requirements, Milestone 2
+  reference RPM/tip-Mach and tip-Mach RPM ceiling, Milestone 3 baseline
+  efficiencies, and Milestone 4 baseline mission energy are all
+  reproduced exactly.
+- No NaN/Inf across the full `eta_T` sensitivity grid (including the
+  stress case).
+
+Explicitly re-verified (engineering sanity audit): `eta_T=1` reproduces
+historical thrust; available thrust falls monotonically as `eta_T`
+falls; the baseline lapse gives `f(0)=1` and is non-increasing in `V`;
+RPM recovery increases as `eta_T` decreases; the power penalty
+(`eta_T^-1.5`) rises faster than the RPM-level recovery ratio
+(`eta_T^-1`); tip Mach rises with recovery RPM; no recovery case silently
+exceeds the tip-Mach ceiling (infeasible cases are flagged, not
+clamped); battery current rises with recovered power; and evaluating any
+M5 case leaves the M4 baseline mission profile, and all M1-M4 committed
+values, byte-for-byte unchanged.
+
+**Final Milestone 5 test count: 58 new tests (318 total with Milestone
+1-4's 260, all passing under `pytest -W error -q`).**
+
+## 43. Explicit Milestone 5 limitations
+
+- Not blade-element momentum theory, not CFD, not a compressor-map
+  simulation, not inlet-distortion modeling, not detailed duct
+  aerodynamics, not a real fan-map calibration.
+- `eta_T` is a single lumped thrust-effectiveness number; it does not
+  separate fan aerodynamic loss from duct/inlet loss (Section 37) --
+  no physically defensible basis for that decomposition was found in the
+  source audit, so no `eta_fan * eta_duct` product is used.
+- The thrust-lapse model (linear or quadratic) is an explicitly
+  ILLUSTRATIVE parametric form, not fit to or validated against any real
+  EDF or propeller thrust-lapse curve.
+- No continuous aircraft drag polar is modeled -- only the static and
+  cruise operating points are treated as thrust requirements; the
+  available-thrust-vs-airspeed curve (Figure 17) is a bookkeeping
+  envelope for the installed fan, not an aircraft performance curve.
+- RPM recovery and its power/electrical/energy consequences use the
+  frozen Milestone 2/3/4 fixed-coefficient conventions (`T~n^2`,
+  `P~n^3`, `eta_motor`, `eta_ESC`) exactly as committed -- no new
+  electromagnetic, thermal, or blade-element physics is introduced.
+- The Milestone 5 off-design mission-energy profile (Section 40.5)
+  applies the recovered static/climb battery power only to the
+  static/climb segments; cruise/loiter are carried forward unmodified
+  from Milestone 3/4 because they pass the thrust-lapse screen without
+  needing recovery at the baseline `eta_T` -- this is a scope choice, not
+  a claim that cruise/climb power is unaffected by `eta_T` in general.
+- No motor/ESC thermal model, no battery electrochemistry, no aircraft
+  trajectory simulation (unchanged from prior milestones).
+
+## 44. Milestone 6 (recommended direction, not implemented here)
+
+Final robustness audit and portfolio synthesis across Milestones 1-5,
+including independent verification, a concise final operating-envelope
+summary, and clean-environment reproducibility, without changing
+historical physics.
