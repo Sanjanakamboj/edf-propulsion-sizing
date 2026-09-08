@@ -189,8 +189,310 @@ independent checks (see each file's docstring), including:
 - Cruise thrust requirement uses a single illustrative L/D scalar, not a
   drag-polar or mission-profile model.
 
-## 9. Milestone 2 (recommended direction, not implemented here)
+## 9. Milestone 1 status
 
-Add blade-tip / fan-face velocity constraints and RPM sizing, including tip
-Mach number and a sourced reduced-order fan pressure-rise / power-coefficient
-model, while preserving this Milestone 1 momentum-theory baseline unchanged.
+Milestone 1 is complete and frozen as of commit `782cc88`. Milestone 2
+(below) is purely additive: it imports and reuses
+`actuator_disk.py`/`efficiency.py`/`requirements.py`/`sizing.py` without
+modifying them, and every Milestone 1 test, script, and figure remains
+unchanged (see Section 17).
+
+---
+
+# Milestone 2 -- RPM, tip-Mach, and reduced-order fan-loading
+
+## 10. Source audit (inspected before writing any M2 physics code)
+
+1. **NACA/propeller-literature thrust and power coefficient conventions**
+   (corroborated across `mh-aerotools.de/airfoils/propuls3.htm`, a
+   propeller-performance reference restating the classical NACA-style
+   nondimensional coefficients, and the NASA/AIAA search survey below).
+   Confirms, verbatim:
+   - `C_T = T / (rho * n^2 * D^4)`
+   - `C_P = P / (rho * n^3 * D^5)`
+   - Advance ratio `J = V / (n * D)`
+   - Propeller efficiency `eta = J * C_T / C_P`
+   with `T` in N, `P` in W, `n` in rev/s, `D` in m, `rho` in kg/m^3 --
+   exactly the convention adopted in `src/edf_sizing/fan_loading.py`.
+2. **Helical blade-tip speed / tip Mach number** (`kitplanes.com/wind-tunnel-52/`,
+   a propeller-design reference restating the classical helical-tip-speed
+   construction, corroborated by a broader NASA NTRS search on "helical tip
+   Mach number" propeller noise/performance literature, e.g. NASA TM
+   82891). Confirms the tangential (rotational) tip speed
+   `V_r = pi*D*N/60` (N in rpm, D in the source's units) and the *total*
+   (helical) tip speed as the vector sum of tangential and forward speed,
+   `V_t = sqrt(V^2 + V_r^2)`, with tip Mach number `= V_t / a`. This is the
+   exact kinematic construction implemented as `relative_tip_mach` in
+   `src/edf_sizing/compressibility.py`. The same source states a
+   conventional propeller design practice of keeping tip Mach below
+   roughly 0.8-0.9 (metal/composite blades a bit higher, wooden blades a
+   bit lower) -- used here only as the origin of the Section 12
+   illustrative tip-Mach ceiling, not as a sourced EDF-specific limit.
+3. **NASA NTRS actuator-disk / propeller general survey** (search only, not
+   fetched in full; e.g. NASA TM X-62,138 and related NACA/NASA propeller
+   reports) -- corroborates that the C_T/C_P/tip-speed terminology above is
+   the standard propeller-literature convention, without introducing any
+   additional equations beyond items 1-2.
+4. **Ideal-gas speed of sound** (standard atmospheric physics, restated
+   from general physics references): `a = sqrt(gamma * R_specific * T)`
+   with `gamma = 1.4` (diatomic ideal gas) and `R_specific = 287.05
+   J/(kg*K)` for dry air. At the ISA sea-level standard temperature
+   `T = 288.15 K` (15 degC) this reproduces the well-known ISA sea-level
+   speed of sound `a ~= 340.3 m/s`, which the implementation matches to
+   0.1 m/s (see `tests/test_compressibility.py`).
+
+**No credible universal EDF-specific C_T, C_P, or tip-Mach limit was
+found.** Both are therefore treated as explicit, labeled sensitivity
+parameters (Sections 11-12), never as sourced design values.
+
+## 11. Rotational kinematics (SOURCED -- standard rigid-body kinematics)
+
+Implemented in `src/edf_sizing/rotational.py`:
+
+```
+n     = RPM / 60                     [rev/s]
+omega = 2*pi*n                       [rad/s]
+R     = D / 2                        [m]
+U_tip = omega * R = pi * D * n       [m/s]
+```
+
+No aerodynamics or atmosphere appears in this module -- it is pure
+kinematics relating RPM, angular speed, and blade-tip speed.
+
+## 12. Speed of sound and blade-tip Mach (SOURCED equations + DERIVED root; ILLUSTRATIVE ceiling)
+
+Implemented in `src/edf_sizing/compressibility.py`.
+
+**SOURCED:**
+
+```
+a = sqrt(gamma * R_specific * T)                     (Section 10.4)
+M_tip,static = U_tip / a                             (Section 10.2)
+M_tip,rel    = sqrt(U_tip^2 + V_inf^2) / a            (Section 10.2)
+```
+
+`T = 288.15 K` (ISA sea level) is used for consistency with the Milestone 1
+`rho = 1.225 kg/m^3` assumption -- a generic illustrative UAV operating
+condition, not a specific mission profile.
+
+`M_tip,rel` is a purely kinematic helical-tip-speed estimate: the vector
+sum of the rotational tip speed and the axial freestream speed. It is
+**NOT** a blade-section local Mach solution, **NOT** a compressible
+blade-element calculation, and **NOT** a shock/transonic prediction --
+induced (axial) velocity through the disk and any spanwise/sweep effects
+are ignored.
+
+**DERIVED (RPM ceiling, inverting the tip-Mach constraint):**
+
+Static: from `M_tip,static <= M_tip,max`,
+
+```
+RPM_max = 60 * M_tip_max * a / (pi * D)
+```
+
+Forward flight: from `M_tip,rel <= M_tip,max`, i.e.
+`sqrt(U_tip^2 + V_inf^2) <= M_tip_max*a`,
+
+```
+U_tip_max = sqrt((M_tip_max*a)^2 - V_inf^2)      [if M_tip_max*a > V_inf]
+RPM_max   = 60 * U_tip_max / (pi * D)
+```
+
+which reduces exactly to the static closed form as `V_inf -> 0`. Per the
+Milestone 2 specification, cases with `M_tip_max*a <= V_inf` are rejected
+as infeasible: the freestream speed alone already meets/exceeds the
+allowed relative tip Mach, so no rotational speed (not even 0 RPM) can
+satisfy the constraint as a usable operating ceiling. This is implemented
+as `RpmCeilingResult(feasible=False, ...)` rather than raising, so sweeps
+can report infeasibility honestly instead of crashing (see
+`tests/test_compressibility.py::test_forward_flight_rpm_ceiling_exact_boundary_infeasible_case`
+for the exact-boundary behavior).
+
+**ILLUSTRATIVE tip-Mach ceiling:** `M_tip_max = 0.85` baseline, with a
+sensitivity set `{0.75, 0.85, 0.95}` (`src/edf_sizing/rotational_study.py`).
+Informed by the ~0.8-0.9 conventional-propeller design-practice range
+noted in Section 10.2, but **not** a sourced universal EDF-specific limit
+-- treated throughout as a configurable, labeled assumption.
+
+## 13. Fan pressure-jump estimate (DERIVED identity with M1 disk loading)
+
+Implemented in `src/edf_sizing/fan_loading.py::pressure_jump_disk`:
+
+```
+Delta_p_disk = T / A
+```
+
+This is numerically **identical** to the Milestone 1 disk-loading quantity
+(`edf_sizing.actuator_disk.disk_loading`) -- the same actuator-disk
+momentum-theory quantity, given a distinct name/interpretation ("idealized
+static pressure jump across the disk") to make that reading explicit. It
+is verified as an exact cross-model identity in
+`tests/test_fan_loading.py::test_pressure_jump_disk_identity_with_m1_disk_loading`
+and `tests/test_rotational_study.py::test_pressure_jump_matches_m1_disk_loading_for_selected_fan`.
+
+This is **NOT** a fan-stage pressure ratio and does **NOT** model any real
+internal static-pressure distribution through an EDF duct/rotor/stator
+stage -- it is the same 1-D actuator-disk idealization as Milestone 1,
+reinterpreted as a pressure jump rather than a force-per-area loading.
+
+## 14. Nondimensional coefficients and RPM-from-C_T inversion
+
+Implemented in `src/edf_sizing/fan_loading.py` (conventions per Section
+10.1):
+
+```
+C_T = T / (rho * n^2 * D^4)
+C_P = P / (rho * n^3 * D^5)
+J   = V_inf / (n * D)
+```
+
+`n = 0` is explicitly rejected (`ValueError`) in all three -- rotational
+coefficients are undefined at zero RPM, never silently evaluated. `P` in
+`C_P` is always the Milestone 1 **illustrative estimated shaft power**
+(`eta_overall = 0.75` bookkeeping estimate), never the ideal actuator-disk
+power and never a measured/calibrated fan efficiency.
+
+**DERIVED inversion** (RPM-from-C_T, Section 8 of the Milestone 2 brief):
+
+```
+n = sqrt(T / (rho * C_T * D^4))
+RPM = 60*n
+```
+
+No defensible single universal C_T exists for a generic reduced-order EDF
+unit at this design stage (Section 10 source audit), so RPM is reported
+across an explicit, deterministic **ILLUSTRATIVE** sensitivity set
+`C_T in {0.05, 0.08, 0.12}` (`src/edf_sizing/rotational_study.py`) rather
+than asserting one "design RPM". Round-trip identity (recomputing C_T from
+the inferred n recovers the assumed C_T) is verified in
+`tests/test_fan_loading.py::test_rev_per_second_from_thrust_coefficient_round_trip`.
+
+**Important limitation:** for a given operating point, RPM is inferred
+independently per assumed C_T case, but the Milestone 1 `P_shaft_est` used
+in `C_P` is *not* a function of that RPM (it comes only from the ideal
+actuator-disk power and `eta_overall`). The resulting `C_P` values are
+therefore a nondimensional bookkeeping exercise, not a physically matched
+propeller/fan performance map (no sourced C_T-vs-C_P-vs-J curve is used or
+implied).
+
+## 15. Milestone 2 results
+
+### 15.1 Static/cruise rotational operating table (selected D = 0.50 m fan)
+
+Ambient: ISA sea level, `a = 340.29 m/s`. Tip-Mach ceiling baseline
+`M_tip_max = 0.85` (illustrative).
+
+| Point | C_T | V_inf [m/s] | T [N] | RPM | U_tip [m/s] | Tip Mach | Mach OK? | Δp_disk [Pa] | C_P | J |
+|---|---|---|---|---|---|---|---|---|---|---|
+| static | 0.05 | 0.0 | 147.10 | 11762 | 307.9 | 0.905 | **NO** | 749.2 | 0.0119 | 0.000 |
+| static | 0.08 | 0.0 | 147.10 | 9298 | 243.4 | 0.715 | yes | 749.2 | 0.0241 | 0.000 |
+| static | 0.12 | 0.0 | 147.10 | 7592 | 198.8 | 0.584 | yes | 749.2 | 0.0442 | 0.000 |
+| cruise | 0.05 | 30.0 | 15.32 | 3796 | 99.4 | 0.305 | yes | 78.0 | 0.0654 | 0.948 |
+| cruise | 0.08 | 30.0 | 15.32 | 3001 | 78.6 | 0.247 | yes | 78.0 | 0.1323 | 1.200 |
+| cruise | 0.12 | 30.0 | 15.32 | 2450 | 64.1 | 0.208 | yes | 78.0 | 0.2431 | 1.469 |
+
+Static and cruise are each swept over the *same* illustrative C_T set, but
+are not forced to use matching values -- the RPM columns differ
+substantially between them, as expected for very different thrust levels.
+
+An honest, not-tuned-away result: the lowest-C_T static case (0.05)
+requires enough RPM that the static tip Mach (0.905) exceeds the 0.85
+illustrative ceiling; the two higher-C_T static cases and all cruise cases
+pass.
+
+### 15.2 Diameter x RPM/tip-Mach trade (full Milestone 1 candidate sweep)
+
+Static thrust requirement fixed at 147.10 N/fan; RPM inferred per C_T case,
+tip Mach checked against `M_tip_max = 0.85`.
+
+| D [m] | M1 disk loading | M1 ideal power | tip-Mach @ C_T=0.05 | @ C_T=0.08 | @ C_T=0.12 | Fully admissible? |
+|---|---|---|---|---|---|---|
+| 0.15-0.30 | FAIL | FAIL | FAIL | FAIL | FAIL | no |
+| 0.35 | FAIL | FAIL | FAIL | FAIL | OK | no |
+| 0.40 | FAIL | OK | FAIL | FAIL | OK | no |
+| 0.45 | FAIL | OK | FAIL | OK | OK | no |
+| **0.50 (M1 selected)** | OK | OK | **FAIL** | OK | OK | **partial** |
+| 0.55, 0.60 | OK | OK | OK | OK | OK | yes |
+
+Full per-diameter, per-C_T table: `scripts/rotational_fan_study.py` output
+and Figure 7.
+
+### 15.3 Reconciliation: does Milestone 2 change the Milestone 1 selection?
+
+**No.** The Milestone 1 D = 0.50 m selection is not invalidated: it still
+passes both Milestone 1 checks (disk loading, ideal power), and it passes
+the Milestone 2 tip-Mach constraint for 2 of the 3 illustrative C_T
+sensitivity cases (0.08 and 0.12). It fails only the most lightly-loaded
+C_T = 0.05 case, which is reported honestly rather than tuned away (per
+the Milestone 2 brief, "some assumed C_T cases violate the tip-Mach
+ceiling" is an acceptable, expected outcome).
+
+**Conclusion: Milestone 2 constrains the admissible RPM range for the
+Milestone 1-selected fan (and, for the lowest-loading C_T assumption,
+rules out that specific operating point) -- it does not change the
+Milestone 1 diameter selection.** See
+`edf_sizing.rotational_study.reconcile_selection_with_tip_mach` and
+`scripts/rotational_fan_study.py`.
+
+## 16. Verification approach (Milestone 2)
+
+`tests/test_rotational.py`, `tests/test_compressibility.py`,
+`tests/test_fan_loading.py`, and `tests/test_rotational_study.py`
+implement independent checks (hand-derived, not re-derived from the
+production formula), including:
+
+- RPM <-> rev/s, omega, and tip-speed hand cases, plus an independent
+  `omega*R` cross-check of `tip_speed`.
+- Speed-of-sound hand calculation matching the ~340.3 m/s ISA sea-level
+  reference value.
+- Static and relative tip-Mach hand cases; relative-tip-Mach reduction to
+  the static formula at `V_inf = 0`; relative tip Mach always >= static
+  tip Mach at the same RPM.
+- RPM-ceiling analytic exact-boundary tests: mach exactly at the ceiling,
+  just-below passes, just-above fails; forward-flight infeasibility at and
+  above the `M_tip_max*a <= V_inf` boundary.
+- Pressure-jump hand calculation and the cross-model identity with the
+  Milestone 1 disk loading.
+- C_T/C_P/J hand calculations; C_T scaling as RPM^-2, C_P as RPM^-3 at
+  fixed T/P/D; zero-RPM rejection for all three.
+- RPM-from-C_T hand-derived inversion and round-trip C_T recovery;
+  required RPM scaling as C_T^-1/2 and as D^-2.
+- Physical trends: U_tip linear in RPM; tip Mach monotonic in RPM; RPM
+  ceiling scaling as D^-1; stricter M_tip_max giving lower allowable RPM.
+- Regression: Milestone 1 static/cruise thrust-per-fan values and the
+  D = 0.50 m selection are unchanged (`tests/test_rotational_study.py`
+  regression tests).
+- No NaN/Inf across the full operating table and diameter/C_T trade sweep.
+
+**Final Milestone 2 test count: 65 new tests (123 total with Milestone 1's
+58, all passing under `pytest -W error -q`).**
+
+## 17. Explicit Milestone 2 limitations
+
+- No blade-element theory: `C_T`/`C_P` are bulk nondimensional numbers, not
+  derived from any blade planform, airfoil, or twist distribution.
+- No motor Kv selection, no ESC or battery sizing.
+- `C_P` is computed from the Milestone 1 illustrative `P_shaft_est`, which
+  is independent of the RPM used in that same row -- this is a
+  nondimensional bookkeeping exercise, not a matched propeller/fan
+  performance map (no C_T-C_P-J curve is fit or assumed).
+- The relative-tip-Mach construction is a kinematic helical-speed estimate
+  only; it ignores induced/axial velocity through the disk, blade sweep,
+  and any local compressibility/shock effects.
+- `M_tip_max = 0.85` (and its `{0.75, 0.85, 0.95}` sensitivity set) is an
+  illustrative ceiling informed by general conventional-propeller design
+  practice, not a sourced universal EDF-specific limit.
+- `C_T in {0.05, 0.08, 0.12}` is an illustrative sensitivity set, not a
+  sourced design value for this or any specific EDF unit.
+- No duct pressure-recovery, inlet/exit loss, or detailed compressor-map
+  model; the pressure-jump estimate remains the same 1-D actuator-disk
+  idealization as Milestone 1.
+- No CFD, no acoustic prediction, no real commercial EDF calibration.
+- Milestone 1's `eta_overall = 0.75` remains a placeholder (Section 4),
+  unchanged and unrevisited in Milestone 2.
+
+## 18. Milestone 3 (recommended direction, not implemented here)
+
+Motor/ESC/electrical operating-point matching and battery-power
+implications, using the Milestone 1/2 aerodynamic and rotational
+requirements without changing them.
