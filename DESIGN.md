@@ -749,9 +749,329 @@ and `tests/test_electrical_sizing.py` implement independent checks
 - Milestone 1's `eta_overall = 0.75` remains an unrevisited placeholder
   (Section 4); Milestone 2's `M_tip_max`/`C_T` assumptions are unchanged.
 
-## 27. Milestone 4 (recommended direction, not implemented here)
+## 27. Milestone 3 status
 
-Not specified by this milestone's scope; to be defined based on portfolio
-priorities (e.g. acoustic estimation, mission-energy/endurance modeling,
-or a sourced reduced-order thermal check on the motor/ESC electrical
-operating point established here).
+Milestone 3 is complete and frozen as of commit `9719e44`. Milestone 4
+(below) is purely additive: it imports and reuses Milestone 1-3
+(`requirements.py`/`actuator_disk.py`/`efficiency.py`/`sizing.py`;
+`rotational.py`/`compressibility.py`/`fan_loading.py`/`rotational_study.py`;
+`motor.py`/`electrical.py`/`battery.py`/`electrical_sizing.py`) without
+modifying any of them, and every Milestone 1-3 test, script, and figure
+remains unchanged (see Section 33).
+
+---
+
+# Milestone 4 -- battery energy, mission-power integration, endurance screening
+
+## 28. Source audit (inspected before writing any M4 energy physics)
+
+1. **Elementary electrical energy** (standard physics, restated):
+   `E = integral(P dt)`, which for a constant-power segment reduces to
+   `E_J = P_W * t_s`; the exact conversion `1 Wh = 3600 J` (since
+   1 W = 1 J/s and 1 hour = 3600 s). These are the two equations
+   implemented in `src/edf_sizing/energy.py::segment_energy_J` and
+   `joules_to_Wh`.
+2. **Battery specific energy for electric aircraft** (NASA feasibility/
+   scaling studies, search-corroborated): a NASA all-electric
+   150-passenger-aircraft feasibility study assumes a **usable** battery
+   energy density of ~300 Wh/kg (large, full-scale-aircraft pack, not
+   representative of small UAV LiPo hardware); a NASA AIAA "Battery
+   Cell-to-Pack Scaling Laws for Electric Aircraft" analysis (NTRS
+   20210009584), corroborated via aggregated search summary, reports the
+   NASA X-57 Maxwell lithium-ion cells at **225 Wh/kg** and the complete
+   battery **pack** at **149 Wh/kg** (~66% of cell-level specific energy
+   retained after packaging). Direct PDF text extraction of the primary
+   NTRS/ICAS documents was inconclusive (heavily compressed/embedded-font
+   PDFs); the 225/149 Wh/kg figures are reported via the search engine's
+   synthesized summary of that document and are used here only as an
+   order-of-magnitude anchor for a small-UAV pack-level specific-energy
+   sensitivity range, NOT as a value directly measured from the source
+   text by this project.
+3. **Depth of discharge / usable-capacity convention** (search-corroborated
+   across multiple battery-technical references, e.g. Wikipedia "Depth of
+   discharge", solaxpower.com, lithiumbatterytech.com): manufacturers
+   typically warrant 80-95% depth-of-discharge (DoD) for high-quality
+   LiFePO4 cells; DoD/usable-capacity conventions are chemistry- and
+   product-specific, and **no single universal usable-fraction value
+   applies across all lithium battery chemistries or all UAV
+   applications**. Electric-aircraft-specific reserve-energy concepts
+   (a dedicated reserve energy system for diversion/loiter/go-around) are
+   also noted in the NASA feasibility-study search results, corroborating
+   that a separate reserve allowance (distinct from usable-fraction
+   de-rating) is standard aviation practice, without prescribing a
+   specific fraction for this generic reduced-order study.
+
+**No credible universal usable-energy fraction, reserve fraction, or
+UAV-specific battery specific-energy value was found.** All three are
+therefore explicit, illustrative sensitivity parameters (Section 30),
+matching the Milestone 4 brief's explicit instruction not to invent a
+universal number.
+
+## 29. Freeze of Milestone 1-3 and consumption convention
+
+Milestone 4 does not modify `actuator_disk.py`, `rotational.py`/
+`compressibility.py`, or `motor.py`/`electrical.py`/`battery.py`/
+`electrical_sizing.py`. It consumes Milestone 3's `ElectricalOperatingPoint
+.battery_power_W` (the per-fan battery-input power, itself already the end
+of the M1-M3 chain `Pi -> P_shaft_est -> P_motor_elec -> P_battery`)
+directly, via `m3_reference_battery_powers()` in
+`src/edf_sizing/mission_sizing.py`, and never re-derives shaft, motor, or
+battery power with a new convention.
+
+**Important modeling note on current vs. energy scope** (see also Section
+31): Milestone 3's battery CURRENT/C-rate screening is evaluated per-fan
+(one motor/ESC/battery circuit) and is frozen exactly as committed.
+Milestone 4's mission ENERGY, per the Milestone 4 brief's explicit
+instruction ("total battery power uses both fans"), is evaluated at the
+whole-aircraft level (per-fan power x `n_fans` = 2). A single candidate
+pack is therefore screened against two conventions that are not perfectly
+architecturally unified (per-fan current vs. whole-aircraft energy) --
+this is a deliberate, documented modeling simplification, not a silently
+introduced inconsistency (Section 34).
+
+## 30. Mission profile, energy equations, reserve/usable-energy convention
+
+Implemented in `src/edf_sizing/mission.py` (segment model),
+`src/edf_sizing/energy.py` (equations), and
+`src/edf_sizing/mission_sizing.py` (predeclared profile + combining logic).
+
+**Predeclared, illustrative, generic mission profile** (declared before
+any energy was computed):
+
+| Segment | Duration | Power | Label |
+|---|---|---|---|
+| launch | 30 s | M3 static battery power, unmodified | -- |
+| climb | 120 s | 0.70 x M3 static battery power | ILLUSTRATIVE fraction |
+| cruise | 1200 s (20 min) | M3 cruise battery power, unmodified | -- |
+| loiter | 300 s (5 min) | 1.20 x M3 cruise battery power | ILLUSTRATIVE fraction |
+
+No new aerodynamic power level is invented -- every segment power is
+either an unmodified M3 static/cruise battery power or an explicit,
+labeled multiple of one. Reserve is handled as a separate energy margin
+(Section on reserve below), not as a fake flight segment.
+
+**SOURCED equations:**
+
+```
+E_segment,J = P_segment,total_W * duration_s
+E_segment,Wh = E_segment,J / 3600
+E_mission = sum(E_segment)
+```
+
+**DERIVED reserve/usable-energy chain** (kept distinct, never
+double-counted):
+
+```
+E_required_Wh         = E_mission_Wh * (1 + reserve_fraction)
+E_nominal_required_Wh = E_required_Wh / usable_fraction
+Capacity_required_Ah  = E_nominal_required_Wh / V_pack_nom
+```
+
+**ILLUSTRATIVE baseline assumptions** (Section 28 -- no universal value
+sourced): `reserve_fraction = 0.20` (sensitivity `{0.10, 0.20, 0.30}`),
+`usable_fraction = 0.80` (sensitivity `{0.70, 0.80, 0.90}`).
+
+## 31. Milestone 4 results
+
+### 31.1 Mission energy
+
+| Segment | Duration | Total power [W] | Energy [Wh] | % of mission |
+|---|---|---|---|---|
+| launch | 30 s | 7857.3 | 65.48 | 7% |
+| climb | 120 s | 5500.1 | 183.34 | 21% |
+| cruise | 1200 s | 1452.2 | 484.07 | **55%** |
+| loiter | 300 s | 1742.7 | 145.22 | 17% |
+
+**Raw mission energy = 878.11 Wh.** The cruise segment dominates mission
+energy (55%) despite having the lowest instantaneous power of any powered
+segment -- a direct consequence of its long duration, not high power.
+
+Reserve-adjusted (x1.20): **1053.73 Wh**. Required nominal (÷0.80):
+**1317.16 Wh**. Required Ah at 14S (51.8 V): **25.43 Ah**.
+
+### 31.2 M3 4.0 Ah baseline pack: current vs. energy screens
+
+| Screen | Result |
+|---|---|
+| Current/C-rate (M3 convention, frozen) | **PASS** (75.84 A, C-rate 18.96 <= 20C) |
+| Mission energy (M4) | **FAIL** (165.8 Wh usable vs. 1053.7 Wh required) |
+| Overall | **FAIL** |
+
+This is the central Milestone 4 finding requested by the brief: the same
+4.0 Ah/14S pack that satisfied Milestone 3's instantaneous current
+screen is drastically undersized for the representative mission's energy
+demand -- current feasibility and energy feasibility are independent
+questions, and a pack can (and here does) pass one while failing the
+other.
+
+### 31.3 Capacity trade at 14S (predeclared rule, Section 30)
+
+> Select the smallest candidate capacity (from `{4, 8, 12, 16, 20, 24, 28,
+> 32} Ah`) that satisfies BOTH the M3 current/C-rate screen AND the M4
+> mission-energy requirement.
+
+| Capacity [Ah] | Usable Wh | Current OK? | Energy OK? | Overall |
+|---|---|---|---|---|
+| 4-24 | 165.8-994.6 | yes | **NO** | NO |
+| **28** | 1160.3 | yes | **yes** | **SELECTED** |
+| 32 | 1326.1 | yes | yes | yes |
+
+**Selected conceptual pack: 14S, 28.0 Ah** (1450.4 Wh nominal). Capacity
+margin +0.101, current margin +6.384 (governing constraint is energy, not
+current).
+
+### 31.4 Voltage trade (12S/14S/16S carried forward from Milestone 3)
+
+| Pack | V_nom | Selected candidate Ah | Nominal Wh | Exact required Ah | Static I [A] |
+|---|---|---|---|---|---|
+| 12S | 44.4 V | 32.0 | 1420.8 | 29.67 | 88.48 |
+| 14S | 51.8 V | 28.0 | 1450.4 | 25.43 | 75.84 |
+| 16S | 59.2 V | 24.0 | 1420.8 | 22.25 | 66.36 |
+
+**Does mission-energy sizing preserve the Milestone 3 14S selection?**
+Answered honestly, with an important nuance:
+
+- Required nominal energy (Wh) is **voltage-invariant** in this model --
+  only required Ah scales inversely with voltage (energy content
+  depends on Wh, not on the arbitrary choice of series count). The small
+  differences in the "Nominal Wh" column above are a **discretization
+  artifact** of the predeclared discrete capacity grid (12S and 16S both
+  happen to round to 1420.8 Wh; 14S rounds to a slightly higher 1450.4 Wh
+  purely because its exact requirement, 25.43 Ah, sits closer to the
+  bottom of its candidate step), not a genuine electrical difference.
+- Applying the M3-style "prefer lowest voltage among feasible candidates"
+  tiebreak mechanically selects **12S** (`matches_m3_selection = False`
+  in `evaluate_voltage_carry_forward`).
+- **However**, this mechanical result is driven entirely by resizing
+  capacity for the energy requirement: at the much larger capacity now
+  required (~22-30 Ah, vs. Milestone 3's 4.0 Ah baseline), 12S's
+  battery continuous-current/C-rate limitation -- the specific reason
+  Milestone 3 rejected it -- disappears, because continuous-current
+  capability scales with capacity while the underlying required current
+  (88.48 A) does not change. **All three candidate voltages become fully
+  current-feasible once capacity is sized for the mission.**
+- Given the exact energy tie and the marginal, grid-driven nature of the
+  mechanical 12S result, this project **retains 14S as the recommended
+  conceptual architecture** (the mechanical tiebreak is reported
+  transparently above, but is not treated as a decisive engineering
+  reason to change the previously committed pack voltage). Either
+  reading is defensible; both are reported rather than silently
+  resolved in one direction.
+
+### 31.5 Sensitivity summary (see `scripts/mission_energy_study.py` for
+full numeric output)
+
+| Factor | Effect on required nominal Wh |
+|---|---|
+| Cruise duration 600/1200/1800 s | 954.1 / 1317.2 / 1680.2 Wh (linear) |
+| Climb duration 60/120/180 s | 1179.7 / 1317.2 / 1454.7 Wh |
+| Usable fraction 0.70/0.80/0.90 | 1505.3 / 1317.2 / 1170.8 Wh |
+| Reserve fraction 0.10/0.20/0.30 | 1207.4 / 1317.2 / 1426.9 Wh |
+
+**Strongest sensitivity: cruise duration** -- it has both the largest
+absolute range across its sensitivity set and, being multiplied through
+the whole reserve/usable chain, the largest effect on required nominal
+Wh per unit change in the underlying assumption (mission energy scales
+exactly linearly with cruise duration, since cruise dominates total
+mission energy at 55%).
+
+### 31.6 Battery mass proxy (illustrative specific energy)
+
+| Specific energy [Wh/kg] | Mass proxy [kg] |
+|---|---|
+| 150 | 8.78 |
+| 200 (baseline) | 6.59 |
+| 250 | 5.27 |
+
+Labeled explicitly as a **"cell/pack-level battery mass proxy"** --
+`m_batt = E_nominal_required_Wh / specific_energy_Wh_per_kg`, with no
+packaging/BMS/interconnect overhead beyond whatever is implicit in the
+chosen specific-energy basis (Section 28.2).
+
+### 31.7 Cruise-only energy diagnostic (RESTRICTED USE)
+
+`t_cruise_equiv = E_usable / P_battery,cruise,total` = **0.80 h** at the
+selected 28 Ah/14S pack. This is a **cruise-only constant-power energy
+diagnostic ONLY** -- it is explicitly NOT a range, flight-endurance, or
+mission-duration-capability claim, and is never combined with the actual
+segmented mission calculation.
+
+## 32. Verification approach (Milestone 4)
+
+`tests/test_mission.py`, `tests/test_energy.py`, and
+`tests/test_mission_sizing.py` implement independent checks (hand-derived,
+not re-derived from the production formula), including:
+
+- `E = P*t` hand calculations; exact J->Wh conversion (`1 Wh = 3600 J`);
+  multi-segment mission sum; fan-count multiplication; zero-duration
+  segment gives exactly zero energy.
+- Reserve-energy and usable-energy-inversion hand calculations, kept
+  algebraically distinct (never double-counted); higher reserve fraction
+  and lower usable fraction both increase required nominal energy.
+- Required-Ah hand calculation; Ah x V reconstructs Wh; higher pack
+  voltage lowers required Ah at fixed Wh.
+- Capacity-margin exact-zero-boundary test, plus below/above-capacity
+  pass/fail tests.
+- Explicit demonstration that current and energy screens are
+  independent: the M3 4.0 Ah/14S pack passes current but fails energy;
+  a deliberately undersized ESC at a large (32 Ah) capacity passes energy
+  but fails current.
+- Regression: Milestone 1 static/cruise battery power, Milestone 2
+  reference RPM/tip-Mach classification, and Milestone 3's 14S static
+  current/C-rate values are all reproduced exactly.
+- Battery-mass hand calculation and specific-energy monotonicity
+  (higher specific energy -> lower mass).
+- No NaN/Inf across the full voltage x capacity sensitivity matrix (3
+  voltages x 8 capacities = 24 combinations).
+
+**Final Milestone 4 test count: 58 new tests (260 total with Milestone
+1-3's 202, all passing under `pytest -W error -q`).**
+
+## 33. Milestone 1-3 preservation confirmation
+
+All Milestone 1-3 source files (`requirements.py`, `actuator_disk.py`,
+`efficiency.py`, `sizing.py`, `rotational.py`, `compressibility.py`,
+`fan_loading.py`, `rotational_study.py`, `motor.py`, `electrical.py`,
+`battery.py`, `electrical_sizing.py`), their tests, their scripts
+(`run_sizing.py`, `make_figures.py`, `rotational_fan_study.py`,
+`make_rotational_figures.py`, `electrical_sizing_study.py`,
+`make_electrical_figures.py`), and all 11 previously committed figures
+are byte-for-byte unchanged by Milestone 4 (verified via `git diff --stat`
+showing zero changes to any of these paths, and figure-hash comparison
+before/after the full 16-figure regeneration).
+
+## 34. Explicit Milestone 4 limitations
+
+- No trajectory/aircraft-performance simulation: a mission segment is
+  exactly `constant electrical power x duration`, with no
+  speed/altitude/acceleration dynamics.
+- No detailed battery electrochemistry, no battery thermal model, no
+  voltage-sag-under-load model, no battery aging/cycle-life model.
+- No motor thermal model (unchanged from Milestone 3).
+- No dispatch/reliability analysis.
+- The cruise-only energy diagnostic (Section 31.7) is explicitly
+  restricted to that single use -- it must never be read as range,
+  endurance, or mission-duration capability.
+- Mission segment durations (30 s / 120 s / 1200 s / 300 s), the climb
+  and loiter power fractions (0.70x static, 1.20x cruise), the reserve
+  fraction, the usable-energy fraction, and the specific-energy
+  sensitivity values are all illustrative, generic assumptions -- not
+  derived from or claimed to represent any real aircraft or mission.
+- The per-fan current (Milestone 3) vs. whole-aircraft energy (Milestone
+  4) scope mismatch (Section 29) is a deliberate modeling simplification
+  per the Milestone 4 brief's own instructions, not a physically unified
+  single-architecture model.
+- The voltage carry-forward "preferred" result (Section 31.4) is
+  reported both mechanically (12S, via a literal lowest-voltage tiebreak)
+  and with the deeper engineering caveat that it is a near-exact tie
+  driven by capacity-grid discretization -- neither reading should be
+  treated as a strong, decisive result.
+- Battery mass (Section 31.6) is a cell/pack-level proxy only; it
+  includes no airframe integration, wiring, connector, or BMS mass beyond
+  whatever the chosen specific-energy basis implicitly assumes.
+
+## 35. Milestone 5 (recommended direction, not implemented here)
+
+Duct/fan efficiency sensitivity and a reduced-order static-to-forward-
+flight thrust lapse model, using the frozen Milestone 1-4 fan/RPM/
+electrical/energy architecture without changing historical results.

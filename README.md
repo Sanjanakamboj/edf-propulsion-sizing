@@ -119,16 +119,61 @@ sourced, independently verifiable loaded-RPM-from-Kv relation could be
 built without inventing unsupported physics) -- Milestone 3 sizes power,
 current, and torque, but not a motor winding speed constant.
 
+## Status: Milestone 4
+
+Milestone 4 is additive on top of the frozen Milestone 1-3 baseline. It
+extends the electrical operating point into a reduced-order mission-energy
+and battery-capacity sizing study:
+
+- A constant-power mission-segment model and a predeclared, illustrative
+  4-segment generic mission profile (launch/climb/cruise/loiter), built
+  entirely from inherited Milestone 3 static/cruise battery powers
+  ([src/edf_sizing/mission.py](src/edf_sizing/mission.py)).
+- Energy integration (`E=P*t`, exact J->Wh conversion), reserve/usable-
+  energy bookkeeping, required capacity, and an illustrative cell/pack-
+  level battery-mass proxy
+  ([src/edf_sizing/energy.py](src/edf_sizing/energy.py)).
+- A combining module: mission energy requirement, a predeclared battery-
+  capacity selection rule (current AND energy must both pass), and a
+  pack-voltage carry-forward trade across the Milestone 3 12S/14S/16S
+  candidates
+  ([src/edf_sizing/mission_sizing.py](src/edf_sizing/mission_sizing.py)).
+
+**Result:** the representative mission (raw energy 878.1 Wh, dominated
+55% by the cruise segment) requires **1317.2 Wh** of nominal battery
+energy once a 20% reserve and an 80% usable-energy fraction are applied
+(both illustrative). The Milestone 3 **4.0 Ah/14S pack passes the current/
+C-rate screen but fails the energy requirement by a wide margin** --
+demonstrating that current feasibility and mission-energy feasibility are
+independent questions. The predeclared capacity-selection rule selects a
+**28.0 Ah/14S** pack (the smallest candidate satisfying both screens).
+Mission-energy sizing does not change the Milestone 1/2 fan selection or
+tip-Mach screen; the Milestone 3 14S voltage choice remains fully valid
+(all three candidate voltages become current-feasible once capacity is
+resized for energy). See [DESIGN.md](DESIGN.md), Milestone 4 sections, for
+the full source audit, equations, sensitivity results, and limitations.
+
+### Explicitly out of scope for Milestone 4
+
+Aircraft trajectory/performance simulation, full trajectory integration,
+detailed battery electrochemistry, battery/motor thermal modeling, battery
+voltage-sag or aging modeling, dispatch/reliability analysis, and
+flight-qualified endurance prediction. A restricted "cruise-only energy
+diagnostic" is computed but explicitly labeled as NOT a range, endurance,
+or mission-duration-capability claim.
+
 ## Repository layout
 
 ```
 src/edf_sizing/     # requirements, actuator_disk, efficiency, sizing (M1)
                      # rotational, compressibility, fan_loading, rotational_study (M2)
                      # motor, electrical, battery, electrical_sizing (M3)
+                     # mission, energy, mission_sizing (M4)
 tests/              # independent verification (pytest)
 scripts/            # run_sizing.py, make_figures.py (M1)
                      # rotational_fan_study.py, make_rotational_figures.py (M2)
                      # electrical_sizing_study.py, make_electrical_figures.py (M3)
+                     # mission_energy_study.py, make_mission_figures.py (M4)
 figures/            # generated portfolio figures (deterministic PNGs)
 ```
 
@@ -144,11 +189,12 @@ python3 scripts/rotational_fan_study.py
 python3 scripts/make_rotational_figures.py
 python3 scripts/electrical_sizing_study.py
 python3 scripts/make_electrical_figures.py
+python3 scripts/mission_energy_study.py
+python3 scripts/make_mission_figures.py
 ```
 
-## Milestone 4 (not yet defined)
+## Milestone 5 (not yet defined)
 
-Not specified by the current milestone scope; a candidate direction is a
-sourced reduced-order thermal check on the motor/ESC electrical operating
-point established in Milestone 3, or mission-energy/endurance modeling,
-without changing the Milestone 1-3 requirements.
+Duct/fan efficiency sensitivity and a reduced-order static-to-forward-
+flight thrust lapse model, using the frozen Milestone 1-4 fan/RPM/
+electrical/energy architecture without changing historical results.
